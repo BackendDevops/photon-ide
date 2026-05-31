@@ -2,10 +2,8 @@
 node_modules/
 dist/
 vb_*/
+build_*/
 *.local
-
-# Photon persistent index (created inside opened projects)
-.photon/
 
 # Rust
 target/
@@ -22,5 +20,5 @@ Thumbs.db
 .vscode/
 .idea/
 
-# Photon per-project index cache
+# Photon persistent index / per-project cache (created inside opened projects)
 .photon/
