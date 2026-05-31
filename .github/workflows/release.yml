@@ -30,6 +30,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Verify tag matches package version
+        if: github.ref_type == 'tag'
+        shell: bash
+        run: |
+          PKG="v$(node -p "require('./package.json').version")"
+          if [ "$PKG" != "${{ github.ref_name }}" ]; then
+            echo "::error::Tag ${{ github.ref_name }} does not match package.json version ($PKG). Bump the version or fix the tag."
+            exit 1
+          fi
+          echo "Tag matches package version: $PKG"
+
       - uses: actions/setup-node@v4
         with:
           node-version: 20
