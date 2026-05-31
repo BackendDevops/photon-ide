@@ -1,0 +1,44 @@
+[package]
+name = "photon-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Photon IDE desktop shell (Tauri)"
+
+[lib]
+name = "photon_app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+photon-core = { path = "../crates/photon-core" }
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+# Integrated terminal
+portable-pty = "0.8"
+# Status bar system stats (process memory, etc.)
+sysinfo = "0.30"
+# Filesystem watcher → live re-index on external file changes
+notify = "6"
+# NoSQL — Redis console (power tools)
+redis = "0.27"
+# AI workspace — OpenAI-compatible HTTP provider (BYO-key)
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# Pillar 3 — Database tools (MySQL / PostgreSQL / SQLite via the Any driver)
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio-rustls",
+    "any",
+    "mysql",
+    "postgres",
+    "sqlite",
+] }
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]

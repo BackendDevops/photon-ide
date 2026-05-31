@@ -1,0 +1,19 @@
+[package]
+name = "photon-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Photon IDE core: workspace, incremental index, PHP & Laravel intelligence"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+# (serde_json used for model fillable/relation serialization in the index)
+thiserror = { workspace = true }
+rusqlite = { workspace = true }
+walkdir = { workspace = true }
+ignore = { workspace = true }
+tree-sitter = { workspace = true }
+tree-sitter-php = { workspace = true }

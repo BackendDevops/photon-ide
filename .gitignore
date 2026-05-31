@@ -1,0 +1,26 @@
+# Node / frontend
+node_modules/
+dist/
+vb_*/
+*.local
+
+# Photon persistent index (created inside opened projects)
+.photon/
+
+# Rust
+target/
+**/*.rs.bk
+
+# Tauri generated
+src-tauri/gen/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+
+# Photon per-project index cache
+.photon/

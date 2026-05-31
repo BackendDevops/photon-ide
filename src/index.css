@@ -1,0 +1,152 @@
+/* Self-hosted fonts (bundled by Vite → works offline). */
+@import "@fontsource/inter/400.css";
+@import "@fontsource/inter/500.css";
+@import "@fontsource/inter/600.css";
+@import "@fontsource/jetbrains-mono/400.css";
+@import "@fontsource/jetbrains-mono/500.css";
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+}
+
+body {
+  /* Subtle vertical gradient on the canvas — depth, not flat monochrome. */
+  background: radial-gradient(120% 80% at 50% -10%, #12161d 0%, theme("colors.surface.0") 60%);
+  color: theme("colors.fg.DEFAULT");
+  font-family: theme("fontFamily.ui");
+  font-size: 15px;
+  font-feature-settings: "cv11", "ss01";
+  letter-spacing: -0.01em;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  user-select: none;
+}
+
+/* Refined, low-profile scrollbars. */
+::-webkit-scrollbar {
+  width: 11px;
+  height: 11px;
+}
+::-webkit-scrollbar-thumb {
+  background: #2b323d;
+  border-radius: 8px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #3a434f;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+@layer components {
+  /* ── Elevation surfaces ── */
+  .surface-1 { @apply bg-surface-1; }
+  .surface-2 { @apply bg-surface-2; }
+  .surface-3 { @apply bg-surface-3 shadow-e2; }
+  .surface-4 { @apply bg-surface-4 shadow-e3; }
+  .surface-5 { @apply bg-surface-5 shadow-e4; }
+
+  /* List rows with smooth hover + active accent bar. */
+  .row {
+    @apply relative flex items-center gap-2 pl-3 pr-2 py-1.5 mx-1 rounded-md text-sm text-fg-muted cursor-default transition-colors duration-120;
+  }
+  .row:hover {
+    @apply bg-white/[0.04] text-fg;
+  }
+  .row-active {
+    @apply bg-accent/15 text-fg;
+  }
+  .row-active::before {
+    content: "";
+    @apply absolute left-0 top-1/2 -translate-y-1/2 h-4 w-[3px] rounded-full bg-accent;
+  }
+
+  .panel-title {
+    @apply text-2xs uppercase tracking-[0.12em] text-fg-faint px-3 py-2.5 font-semibold select-none;
+  }
+
+  .kbd {
+    @apply text-2xs font-medium px-1.5 py-0.5 rounded bg-white/[0.06] border border-white/[0.06] text-fg-muted;
+  }
+
+  /* Status / info chips. */
+  .chip {
+    @apply inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-2xs font-medium;
+  }
+
+  /* Toolbar segment buttons. */
+  .seg {
+    @apply flex items-center gap-1.5 px-2.5 py-1 rounded-md text-sm text-fg-muted hover:bg-white/[0.05] hover:text-fg transition-colors duration-120;
+  }
+
+  .icon-btn {
+    @apply w-8 h-8 flex items-center justify-center rounded-md text-fg-faint hover:text-fg hover:bg-white/[0.05] transition-colors duration-120;
+  }
+
+  .input {
+    @apply bg-surface-1 border border-line rounded-md px-2.5 py-1.5 text-sm text-fg outline-none transition-colors duration-120 focus:border-accent focus:shadow-glow;
+  }
+  .btn-primary {
+    @apply text-sm px-3 py-1.5 rounded-md bg-accent text-white font-medium hover:bg-accent-hover transition-colors duration-120 disabled:opacity-40;
+  }
+  .btn-ghost {
+    @apply text-sm px-3 py-1.5 rounded-md text-fg-muted hover:bg-white/[0.06] transition-colors duration-120;
+  }
+}
+
+/* Status dot helper (semantic). */
+.dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 9999px;
+  display: inline-block;
+}
+
+.pop-in {
+  animation: theme("animation.pop-in");
+}
+
+/* Test runner ▶ glyph (Pest/PHPUnit). */
+.test-run { cursor: pointer; }
+.test-run::before {
+  content: "\25B6";
+  color: #3fb950;
+  font-size: 11px;
+  display: block;
+  text-align: center;
+  line-height: inherit;
+}
+
+/* Debugger current-line highlight + inline evaluated values. */
+.dbg-line { background: rgba(245, 191, 66, 0.10); }
+.dbg-inline { color: #7a7e85; font-style: italic; }
+
+/* Git diff bars on the editor gutter's left edge. */
+.gd-add { border-left: 2px solid #3fb950; margin-left: 2px; }
+.gd-mod { border-left: 2px solid #4c8bf5; margin-left: 2px; }
+.gd-del { border-left: 2px solid #ff5d5d; margin-left: 2px; }
+
+/* Xdebug breakpoint glyph in the editor gutter. */
+.photon-bp::before {
+  content: "●";
+  color: #ff5d5d;
+  font-size: 13px;
+  display: block;
+  text-align: center;
+  line-height: inherit;
+}
