@@ -1172,6 +1172,14 @@ fn walk_relations(node: Node, src: &[u8], out: &mut Vec<(String, String, String)
                         _ => {}
                     }
                 }
+                if let Ok(source_str) = std::str::from_utf8(src) {
+                    if let Some(doc) = preceding_docblock(source_str, child.start_byte()) {
+                        let d = crate::phpdoc::parse(doc);
+                        for mixin in d.mixins {
+                            out.push((src_name.clone(), mixin, "mixin".into()));
+                        }
+                    }
+                }
             }
         }
         walk_relations(child, src, out);

@@ -950,6 +950,39 @@ pub fn extract_user_facades(rel: &str, source: &str) -> Vec<crate::types::Bindin
     out
 }
 
+/// Extract `ClassName::macro('methodName', ...)` calls as synthetic member types.
+/// Enables IDE completion for macros registered in service providers.
+pub fn extract_macros(rel: &str, source: &str) -> Vec<(String, String, String, String)> {
+    let _ = rel;
+    let mut out = Vec::new();
+    let needle = "::macro(";
+    let mut from = 0;
+    while let Some(p) = source[from..].find(needle) {
+        let at = from + p;
+        from = at + needle.len();
+        let before = &source[..at];
+        let class: String = before
+            .chars()
+            .rev()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect();
+        if class.is_empty() {
+            continue;
+        }
+        let open = at + needle.len() - 1;
+        let args = balanced_parens(source, open);
+        let method_name = string_literals(&args).into_iter().next().unwrap_or_default();
+        if method_name.is_empty() {
+            continue;
+        }
+        out.push((class, method_name, "method".to_string(), "mixed".to_string()));
+    }
+    out
+}
+
 pub fn extract_artifacts(rel: &str, source: &str) -> Vec<crate::types::ArtifactInfo> {
     let mut out = Vec::new();
     for (name, base, idx) in find_classes(source) {

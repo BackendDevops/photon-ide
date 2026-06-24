@@ -290,8 +290,12 @@ impl Engine {
                 .replace_refs_for_file(rel, &php::extract_references(rel, src))?;
             self.index
                 .replace_type_relations_for_file(rel, &php::extract_type_relations(rel, src))?;
-            self.index
-                .replace_member_types_for_file(rel, &php::extract_member_types(rel, src))?;
+            let mut member_types = php::extract_member_types(rel, src);
+            let macros = laravel::extract_macros(rel, src);
+            if !macros.is_empty() {
+                member_types.extend(macros);
+            }
+            self.index.replace_member_types_for_file(rel, &member_types)?;
 
             // Laravel routes (path checks use `inner` — the label-stripped path)
             if laravel::is_routes_file(inner) {

@@ -378,7 +378,7 @@ impl Index {
     /// walking. Returns the `dst` names of extends/uses relations.
     pub fn supertypes(&self, name: &str) -> anyhow::Result<Vec<String>> {
         let mut stmt = self.conn.prepare(
-            "SELECT DISTINCT dst FROM type_relations WHERE src = ?1 AND rel IN ('extends','uses')",
+            "SELECT DISTINCT dst FROM type_relations WHERE src = ?1 AND rel IN ('extends','uses','mixin')",
         )?;
         let rows = stmt.query_map(params![name], |r| r.get::<_, String>(0))?;
         Ok(rows.filter_map(Result::ok).collect())
@@ -1043,6 +1043,10 @@ impl Index {
                 "INSERT INTO type_relations(src, dst, rel, file, line)
                  VALUES (?1, ?2, 'extends', '__stub__', 0)",
             )?;
+            let mut tr_mixin = tx.prepare(
+                "INSERT INTO type_relations(src, dst, rel, file, line)
+                 VALUES (?1, ?2, 'mixin', '__stub__', 0)",
+            )?;
             for (fqn, def) in obj {
                 let short = fqn.rsplit('\\').next().unwrap_or(fqn.as_str());
                 if let Some(methods) = def.get("methods").and_then(|m| m.as_object()) {
@@ -1059,6 +1063,13 @@ impl Index {
                     tr.execute(params![fqn, parent_fqn])?;
                     if short != fqn.as_str() {
                         tr.execute(params![short, parent_short])?;
+                    }
+                }
+                if let Some(mixin_fqn) = def.get("mixin").and_then(|v| v.as_str()) {
+                    let mixin_short = mixin_fqn.rsplit('\\').next().unwrap_or(mixin_fqn);
+                    tr_mixin.execute(params![fqn, mixin_fqn])?;
+                    if short != fqn.as_str() {
+                        tr_mixin.execute(params![short, mixin_short])?;
                     }
                 }
             }

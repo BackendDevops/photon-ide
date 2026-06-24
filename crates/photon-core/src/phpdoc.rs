@@ -22,6 +22,8 @@ pub struct DocTypes {
     pub methods: Vec<(String, String)>,
     /// Generic element per method return.
     pub method_items: Vec<(String, String)>,
+    /// `@mixin ClassName` — this class delegates to the named class's methods.
+    pub mixins: Vec<String>,
 }
 
 const BUILTINS: &[&str] = &[
@@ -195,6 +197,15 @@ pub fn parse(doc: &str) -> DocTypes {
                         if let Some(inner) = raw.and_then(generic_inner) {
                             out.method_items.push((name, inner));
                         }
+                    }
+                }
+            }
+            "mixin" => {
+                if let Some(raw) = it.next() {
+                    let s = raw.trim_start_matches('\\');
+                    let short = s.rsplit('\\').next().unwrap_or(s);
+                    if !short.is_empty() && short.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                        out.mixins.push(short.to_string());
                     }
                 }
             }

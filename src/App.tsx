@@ -895,7 +895,7 @@ export default function App() {
         case "code_comment":
           showToast("Editor action — see docs/17 (full v2)");
           break;
-        case "about": showToast("Photon IDE 2.16 — native PHP/Laravel IDE"); break;
+        case "about": showToast("Photon IDE 2.20 — native PHP/Laravel IDE"); break;
         case "docs": showToast("See the docs/ folder in the project"); break;
       }
     });
