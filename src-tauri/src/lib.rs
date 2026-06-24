@@ -780,6 +780,40 @@ fn run_artisan(args: String, state: State<'_, AppState>) -> CmdResult<String> {
 /// Resolve a member-access chain to a class name, walking declared member
 /// types (`$this->svc->find()` → the find() return type). Shared by member
 /// completion and receiver-aware go-to-definition.
+/// Maps a Laravel facade short name to the FQN of the concrete class registered
+/// in the Illuminate stubs. Returns the FQN so `stub_symbols_for(fqn)` resolves
+/// correctly even when two facades share a short class name (e.g. both Cache and
+/// Config would resolve to "Repository" without the namespace qualifier).
+fn facade_concrete(name: &str) -> Option<&'static str> {
+    match name {
+        "Auth"         => Some("Illuminate\\Auth\\AuthManager"),
+        "Cache"        => Some("Illuminate\\Cache\\Repository"),
+        "Config"       => Some("Illuminate\\Config\\Repository"),
+        "DB"           => Some("Illuminate\\Database\\DatabaseManager"),
+        "Event"        => Some("Illuminate\\Events\\Dispatcher"),
+        "Gate"         => Some("Illuminate\\Auth\\Access\\Gate"),
+        "Hash"         => Some("Illuminate\\Hashing\\HashManager"),
+        "Http"         => Some("Illuminate\\Http\\Client\\PendingRequest"),
+        "Log"          => Some("Illuminate\\Log\\LogManager"),
+        "Mail"         => Some("Illuminate\\Mail\\Mailer"),
+        "Queue"        => Some("Illuminate\\Queue\\QueueManager"),
+        "Redis"        => Some("Illuminate\\Redis\\RedisManager"),
+        "Route"        => Some("Illuminate\\Routing\\Router"),
+        "Session"      => Some("Illuminate\\Session\\SessionManager"),
+        "Storage"      => Some("Illuminate\\Filesystem\\FilesystemManager"),
+        "Str"          => Some("Illuminate\\Support\\Str"),
+        "Validator"    => Some("Illuminate\\Validation\\Factory"),
+        "View"         => Some("Illuminate\\View\\Factory"),
+        "Crypt"        => Some("Illuminate\\Encryption\\Encrypter"),
+        "File"         => Some("Illuminate\\Filesystem\\Filesystem"),
+        "Response"     => Some("Illuminate\\Routing\\ResponseFactory"),
+        "URL"          => Some("Illuminate\\Routing\\UrlGenerator"),
+        "Cookie"       => Some("Illuminate\\Cookie\\CookieJar"),
+        "RateLimiter"  => Some("Illuminate\\Cache\\RateLimiter"),
+        _ => None,
+    }
+}
+
 fn resolve_chain_class(engine: &photon_core::Engine, file: &str, offset: u32, chain: &str) -> Option<String> {
     let source = engine.workspace.read_file(file).unwrap_or_default();
     let symbols = engine.index.symbols_in_file(file).unwrap_or_default();
@@ -793,9 +827,26 @@ fn resolve_chain_class(engine: &photon_core::Engine, file: &str, offset: u32, ch
         } else if root == "auth" {
             Some("User".to_string())
         } else if root.starts_with('$') {
-            photon_core::infer::infer_var_type(&source, &root)
+            // Infer the var's type, then resolve any interface/abstract binding
+            // to its concrete implementation so completions follow the real class.
+            let inferred = photon_core::infer::infer_var_type(&source, &root);
+            inferred.and_then(|ty| {
+                engine.index.resolve_binding(&ty).ok().flatten()
+                    .map(|c| c.rsplit('\\').next().unwrap_or("").to_string())
+                    .filter(|s| !s.is_empty())
+                    .or(Some(ty))
+            })
         } else {
-            Some(root.trim_end_matches("::").to_string())
+            let raw = root.trim_end_matches("::").to_string();
+            // Built-in Laravel facades → concrete stub class.
+            if let Some(concrete) = facade_concrete(&raw) {
+                return Some(concrete.to_string());
+            }
+            // User-defined facades (stored in bindings table via getFacadeAccessor parse).
+            if let Some(user_concrete) = engine.index.resolve_facade(&raw).ok().flatten() {
+                return Some(user_concrete);
+            }
+            Some(raw)
         }
     });
 
@@ -844,7 +895,15 @@ fn resolve_chain_class(engine: &photon_core::Engine, file: &str, offset: u32, ch
         elem = engine.index.member_element_type(&class, name).ok().flatten();
         cur = match engine.index.member_type(&class, name).ok().flatten() {
             Some(t) if matches!(t.as_str(), "self" | "static" | "$this") => Some(class),
-            Some(t) => Some(t),
+            Some(t) => {
+                // If the declared return/property type is an abstract or interface,
+                // resolve it to the concrete binding so the chain stays accurate.
+                let resolved = engine.index.resolve_binding(&t).ok().flatten()
+                    .map(|c| c.rsplit('\\').next().unwrap_or("").to_string())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or(t);
+                Some(resolved)
+            }
             None => None,
         };
     }
@@ -968,6 +1027,33 @@ fn member_completions(
             .and_then(|defs| defs.into_iter().next())
             .and_then(|def| engine.workspace.read_file(&def.file).ok())
             .and_then(|src| class_parent(&src, &c));
+    }
+    // Stub completions: Illuminate framework methods loaded from illuminate.json,
+    // covering Request, Collection, Builder, Model, Carbon and friends.
+    {
+        let mut stub_q = vec![class.clone()];
+        let mut stub_visited = std::collections::HashSet::new();
+        while let Some(c) = stub_q.pop() {
+            if !stub_visited.insert(c.clone()) {
+                continue;
+            }
+            for (mname, _kind, _ty) in engine.index.stub_symbols_for(&c).unwrap_or_default() {
+                out.push(photon_core::Symbol {
+                    name: mname,
+                    fqn: None,
+                    kind: photon_core::SymbolKind::Method,
+                    file: String::new(),
+                    container: Some(c.clone()),
+                    line: 0,
+                    name_offset: 0,
+                    range_start: 0,
+                    range_end: 0,
+                });
+            }
+            for sup in engine.index.supertypes(&c).unwrap_or_default() {
+                stub_q.push(sup);
+            }
+        }
     }
     // Eloquent awareness (Laravel-Idea style): if the receiver is a model,
     // also offer query-builder methods, the model's columns, and relations —
@@ -1695,13 +1781,15 @@ fn class_member_set(
             return None; // Eloquent magic columns
         }
         let members = engine.index.members_of(&c).unwrap_or_default();
+        let stub_names = engine.index.stub_member_names(&c).unwrap_or_default();
         let has_symbol = engine
             .index
             .find_symbol(&c)
             .map(|v| !v.is_empty())
             .unwrap_or(false);
         // An ancestor we can neither resolve nor see members of → unknown base.
-        if c != root && !has_symbol && members.is_empty() {
+        // A class covered by stubs (e.g. Illuminate\Http\Request) is always known.
+        if c != root && !has_symbol && members.is_empty() && stub_names.is_empty() {
             return None;
         }
         for m in &members {
@@ -1710,6 +1798,7 @@ fn class_member_set(
             }
             set.insert(m.name.clone());
         }
+        set.extend(stub_names);
         for sup in engine.index.supertypes(&c).unwrap_or_default() {
             queue.push(sup);
         }

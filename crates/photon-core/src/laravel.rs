@@ -910,6 +910,46 @@ pub fn extract_jobs(rel: &str, source: &str) -> Vec<crate::types::JobInfo> {
     out
 }
 
+/// Detect classes that `extends Facade` and parse their `getFacadeAccessor()`
+/// return value. Returns one `Binding` per user-defined facade with
+/// `kind = "user_facade"` so `resolve_facade()` can look them up at completion time.
+pub fn extract_user_facades(rel: &str, source: &str) -> Vec<crate::types::Binding> {
+    let mut out = Vec::new();
+    for (class_name, base, idx) in find_classes(source) {
+        if base != "Facade" {
+            continue;
+        }
+        // Search within the next 4 KB for the accessor method.
+        let window_end = (idx + 4096).min(source.len());
+        let region = &source[idx..window_end];
+        let Some(method_pos) = region.find("getFacadeAccessor") else { continue };
+        let after_method = &region[method_pos..];
+        // Find the opening brace of the method body.
+        let Some(open) = after_method.find('{') else { continue };
+        // Assume the method body closes at the first `}` — getFacadeAccessor is
+        // always a one-liner.
+        let body = &after_method[open..];
+        let Some(close) = body.find('}') else { continue };
+        let method_body = &body[1..close]; // content between { and }
+        // Return value is a class const (PaymentGateway::class) or a string
+        // literal ('payment', "cache", …).
+        let concrete = first_class_const(method_body)
+            .or_else(|| string_literals(method_body).into_iter().next());
+        let Some(concrete_val) = concrete else { continue };
+        if concrete_val.is_empty() {
+            continue;
+        }
+        out.push(crate::types::Binding {
+            abstract_name: class_name,
+            concrete: Some(concrete_val),
+            kind: "user_facade".to_string(),
+            file: rel.to_string(),
+            line: line_at(source, idx),
+        });
+    }
+    out
+}
+
 pub fn extract_artifacts(rel: &str, source: &str) -> Vec<crate::types::ArtifactInfo> {
     let mut out = Vec::new();
     for (name, base, idx) in find_classes(source) {

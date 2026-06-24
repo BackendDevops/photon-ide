@@ -175,6 +175,8 @@ impl Index {
     }
 
     /// Clear all rows (used for a full re-index in the MVP).
+    /// Stub rows (file = "__stub__") in member_types / type_relations are
+    /// intentionally preserved so framework stubs survive a re-index cycle.
     pub fn clear(&self) -> anyhow::Result<()> {
         self.conn.execute_batch(
             "DELETE FROM files; DELETE FROM symbols; DELETE FROM routes;
@@ -182,7 +184,8 @@ impl Index {
              DELETE FROM config_keys; DELETE FROM translations;
              DELETE FROM bindings; DELETE FROM events; DELETE FROM jobs;
              DELETE FROM artifacts; DELETE FROM mig_columns;
-             DELETE FROM type_relations; DELETE FROM member_types;",
+             DELETE FROM type_relations WHERE file != '__stub__';
+             DELETE FROM member_types   WHERE file != '__stub__';",
         )?;
         Ok(())
     }
@@ -1017,6 +1020,110 @@ impl Index {
             [],
         )?;
         Ok(())
+    }
+
+    /// Load pre-built framework stubs (JSON bytes) into member_types and
+    /// type_relations with file = "__stub__". Always replaces existing stubs
+    /// so a new app version picks up updated method lists automatically.
+    pub fn load_stubs(&mut self, json: &str) -> anyhow::Result<()> {
+        let stubs: serde_json::Value = serde_json::from_str(json)
+            .map_err(|e| anyhow::anyhow!("stub JSON parse error: {e}"))?;
+        let obj = stubs
+            .as_object()
+            .ok_or_else(|| anyhow::anyhow!("stubs root must be a JSON object"))?;
+        let tx = self.conn.transaction()?;
+        tx.execute("DELETE FROM member_types   WHERE file = '__stub__'", [])?;
+        tx.execute("DELETE FROM type_relations WHERE file = '__stub__'", [])?;
+        {
+            let mut mt = tx.prepare(
+                "INSERT INTO member_types(container, member, kind, ty, file)
+                 VALUES (?1, ?2, ?3, ?4, '__stub__')",
+            )?;
+            let mut tr = tx.prepare(
+                "INSERT INTO type_relations(src, dst, rel, file, line)
+                 VALUES (?1, ?2, 'extends', '__stub__', 0)",
+            )?;
+            for (fqn, def) in obj {
+                let short = fqn.rsplit('\\').next().unwrap_or(fqn.as_str());
+                if let Some(methods) = def.get("methods").and_then(|m| m.as_object()) {
+                    for (mname, sig) in methods {
+                        let ret = sig.get("return").and_then(|v| v.as_str()).unwrap_or("mixed");
+                        mt.execute(params![fqn, mname, "method", ret])?;
+                        if short != fqn.as_str() {
+                            mt.execute(params![short, mname, "method", ret])?;
+                        }
+                    }
+                }
+                if let Some(parent_fqn) = def.get("extends").and_then(|v| v.as_str()) {
+                    let parent_short = parent_fqn.rsplit('\\').next().unwrap_or(parent_fqn);
+                    tr.execute(params![fqn, parent_fqn])?;
+                    if short != fqn.as_str() {
+                        tr.execute(params![short, parent_short])?;
+                    }
+                }
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Resolve an abstract class / interface name to its concrete binding from
+    /// a service provider registration (`bind`, `singleton`, etc.). Returns the
+    /// `concrete` column, or `None` if not found / bound to a Closure.
+    pub fn resolve_binding(&self, abstract_name: &str) -> anyhow::Result<Option<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT concrete FROM bindings
+             WHERE abstract_name = ?1
+               AND kind IN ('bind','singleton','scoped','instance','bindIf','singletonIf')
+               AND concrete IS NOT NULL
+               AND concrete != 'Closure'
+             LIMIT 1",
+        )?;
+        let mut rows = stmt.query_map(params![abstract_name], |r| r.get::<_, Option<String>>(0))?;
+        Ok(rows.next().and_then(|r| r.ok()).flatten())
+    }
+
+    /// Resolve a user-defined facade class name to the concrete class it wraps.
+    /// Returns the `concrete` column from a binding stored with kind = 'user_facade'.
+    pub fn resolve_facade(&self, facade_class: &str) -> anyhow::Result<Option<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT concrete FROM bindings WHERE abstract_name = ?1 AND kind = 'user_facade' LIMIT 1",
+        )?;
+        let mut rows = stmt.query_map(params![facade_class], |r| r.get::<_, Option<String>>(0))?;
+        Ok(rows.next().and_then(|r| r.ok()).flatten())
+    }
+
+    /// All member names defined in stubs for `container`. Used by diagnostics
+    /// to avoid "undefined member" false positives on Illuminate classes.
+    pub fn stub_member_names(
+        &self,
+        container: &str,
+    ) -> anyhow::Result<std::collections::HashSet<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT member FROM member_types WHERE container = ?1 AND file = '__stub__'",
+        )?;
+        let rows = stmt.query_map(params![container], |r| r.get::<_, String>(0))?;
+        Ok(rows.filter_map(Result::ok).collect())
+    }
+
+    /// All (member, kind, ty) tuples from stubs for `container` — powers
+    /// stub-aware completions so Illuminate methods appear without a vendor index.
+    pub fn stub_symbols_for(
+        &self,
+        container: &str,
+    ) -> anyhow::Result<Vec<(String, String, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT member, kind, ty FROM member_types
+             WHERE container = ?1 AND file = '__stub__'",
+        )?;
+        let rows = stmt.query_map(params![container], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?;
+        Ok(rows.filter_map(Result::ok).collect())
     }
 }
 

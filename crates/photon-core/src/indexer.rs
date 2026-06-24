@@ -10,6 +10,8 @@ use crate::types::{KeyEntry, ProjectSummary, RootInfo};
 use crate::{laravel, php};
 use crate::workspace::Workspace;
 
+const ILLUMINATE_STUBS: &str = include_str!("../stubs/illuminate.json");
+
 pub struct Engine {
     pub workspace: Workspace,
     pub index: Index,
@@ -17,7 +19,8 @@ pub struct Engine {
 
 impl Engine {
     /// Back-compat single-root constructor (indexes the root immediately).
-    pub fn new(root: impl Into<std::path::PathBuf>, index: Index) -> Self {
+    pub fn new(root: impl Into<std::path::PathBuf>, mut index: Index) -> Self {
+        let _ = index.load_stubs(ILLUMINATE_STUBS);
         let mut e = Engine {
             workspace: Workspace::open(root),
             index,
@@ -27,7 +30,8 @@ impl Engine {
     }
 
     /// Empty engine; add projects with `add_project`.
-    pub fn new_empty(index: Index) -> Self {
+    pub fn new_empty(mut index: Index) -> Self {
+        let _ = index.load_stubs(ILLUMINATE_STUBS);
         Engine {
             workspace: Workspace::new(),
             index,
@@ -305,8 +309,9 @@ impl Engine {
             if !models.is_empty() {
                 self.index.replace_models_for_file(rel, &models)?;
             }
-            // Container bindings, events, jobs, factories/seeders
-            let bindings = laravel::extract_bindings(rel, src);
+            // Container bindings, events, jobs, factories/seeders, user facades
+            let mut bindings = laravel::extract_bindings(rel, src);
+            bindings.extend(laravel::extract_user_facades(rel, src));
             let events = laravel::extract_events(rel, src);
             let jobs = laravel::extract_jobs(rel, src);
             let artifacts = laravel::extract_artifacts(rel, src);

@@ -23,8 +23,11 @@ pub fn enclosing_class(symbols: &[Symbol], offset: u32) -> Option<String> {
         .map(|s| s.name.clone())
 }
 
-/// Infer the class type of a `$var` from the source: `$var = new Foo`,
-/// a typed parameter `Foo $var`, or a typed property `private Foo $var`.
+/// Infer the class type of a `$var` from the source:
+/// - `$var = new Foo(…)`
+/// - `$var = app(Foo::class)` / `resolve(Foo::class)` / `->make(Foo::class)`
+/// - typed parameter `Foo $var`
+/// - typed property `private Foo $var`
 pub fn infer_var_type(source: &str, var_with_dollar: &str) -> Option<String> {
     let var = var_with_dollar;
     let mut idx = 0usize;
@@ -42,14 +45,19 @@ pub fn infer_var_type(source: &str, var_with_dollar: &str) -> Option<String> {
             continue;
         }
         let after = source[idx..].trim_start();
-        // `$var = new Foo(`
+        // `$var = <expr>`
         if let Some(rest) = after.strip_prefix('=') {
             let rest = rest.trim_start();
+            // `$var = new Foo(`
             if let Some(r2) = rest.strip_prefix("new ") {
                 let ty = read_type(r2.trim_start());
                 if !ty.is_empty() {
                     return Some(short(&ty)); // assignment wins
                 }
+            }
+            // `$var = app(Foo::class)` / `resolve(Foo::class)` / `->make(Foo::class)`
+            if let Some(class) = extract_container_call(rest) {
+                return Some(class);
             }
             continue;
         }
@@ -66,6 +74,35 @@ pub fn infer_var_type(source: &str, var_with_dollar: &str) -> Option<String> {
         }
     }
     typed
+}
+
+/// Extract the class argument from a service-container call on the same
+/// assignment RHS. Handles:
+/// - `app(Foo::class)`, `resolve(Foo::class)`
+/// - `$this->app->make(Foo::class)`, `App::make(Foo::class)`
+/// - `app()->make(Foo::class)`, `$app->makeWith(Foo::class)`
+fn extract_container_call(s: &str) -> Option<String> {
+    let class_pos = s.find("::class")?;
+    let before = &s[..class_pos];
+    // Walk backwards to extract the class name token.
+    let class_name: String = before
+        .chars()
+        .rev()
+        .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '\\')
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    if class_name.is_empty() {
+        return None;
+    }
+    let prefix = &before[..before.len() - class_name.len()];
+    let is_container = prefix.contains("app(")
+        || prefix.contains("resolve(")
+        || prefix.contains("->make(")
+        || prefix.contains("::make(")
+        || prefix.contains("->makeWith(");
+    if is_container { Some(short(&class_name)) } else { None }
 }
 
 fn read_type(s: &str) -> String {
