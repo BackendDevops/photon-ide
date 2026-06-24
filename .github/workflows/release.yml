@@ -84,7 +84,7 @@ jobs:
       - name: Build & release (Tauri)
         uses: tauri-apps/tauri-action@v0
         env:
-          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}
           CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
           CARGO_NET_RETRY: "5"
           CARGO_NET_GIT_FETCH_WITH_CLI: "true"
