@@ -16,11 +16,13 @@ export default function DbPanel({
   onNewSource,
   onEditSource,
   onRunQuery,
+  onToast,
 }: {
   refreshKey: number;
   onNewSource: () => void;
   onEditSource: (ds: DataSource) => void;
   onRunQuery: (connection: string, sql: string) => void;
+  onToast?: (msg: string) => void;
 }) {
   const [sources, setSources] = useState<DataSource[]>([]);
   const [schemas, setSchemas] = useState<Record<string, DbSchema>>({});
@@ -41,8 +43,10 @@ export default function DbPanel({
       await api.dbConnectSource(ds.id);
       const schema = await api.dbSchema(ds.name);
       setSchemas((s) => ({ ...s, [ds.name]: schema }));
+      onToast?.(`Connected to ${ds.name} · ${schema.tables?.length ?? 0} tables`);
     } catch (e) {
       setError(String(e));
+      onToast?.(`Connect failed: ${String(e).split("\n")[0].slice(0, 80)}`);
     } finally {
       setConnecting(null);
     }

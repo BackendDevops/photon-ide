@@ -39,6 +39,10 @@ sqlx = { version = "0.8", default-features = false, features = [
     "postgres",
     "sqlite",
 ] }
+# Fast mutex — 2-4x faster than std::sync::Mutex for short critical sections.
+# rusqlite::Connection is Send but NOT Sync (uses RefCell internally), so we
+# MUST use Mutex (not RwLock) which only requires T: Send on the guarded type.
+parking_lot = "0.12"
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]

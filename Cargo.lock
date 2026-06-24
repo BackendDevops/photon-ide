@@ -2755,10 +2755,11 @@ dependencies = [
 
 [[package]]
 name = "photon-app"
-version = "2.10.0"
+version = "2.16.0"
 dependencies = [
  "anyhow",
  "notify",
+ "parking_lot",
  "photon-core",
  "portable-pty",
  "redis",
@@ -2775,10 +2776,11 @@ dependencies = [
 
 [[package]]
 name = "photon-core"
-version = "2.10.0"
+version = "2.16.0"
 dependencies = [
  "anyhow",
  "ignore",
+ "rayon",
  "rusqlite",
  "serde",
  "serde_json",

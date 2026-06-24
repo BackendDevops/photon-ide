@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import React, { useMemo, useState } from "react";
 import type { FileEntry } from "../lib/api";
 import { FileIcon, FolderIcon } from "./icons";
 
@@ -117,7 +117,7 @@ function Row({
   );
 }
 
-export default function FileTree({
+function FileTree({
   files,
   activePath,
   onOpen,
@@ -142,3 +142,5 @@ export default function FileTree({
     </div>
   );
 }
+
+export default React.memo(FileTree);

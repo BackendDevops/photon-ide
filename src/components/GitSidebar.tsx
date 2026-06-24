@@ -19,11 +19,13 @@ export default function GitSidebar({
   onOpenDiff,
   onOpenFile,
   onResolveConflict,
+  onToast,
 }: {
   onChanged: () => void;
   onOpenDiff: (file: string) => void;
   onOpenFile: (file: string) => void;
   onResolveConflict?: (file: string) => void;
+  onToast?: (msg: string) => void;
 }) {
   const [menu, setMenu] = useState<{ x: number; y: number; file: string; staged: boolean } | null>(null);
   const [status, setStatus] = useState<GitStatus | null>(null);
@@ -57,14 +59,23 @@ export default function GitSidebar({
     refresh();
   }, [refresh]);
 
-  const act = async (fn: () => Promise<unknown>) => {
+  const act = async (fn: () => Promise<unknown>, label?: string) => {
     setBusy(true);
     try {
-      await fn();
+      const out = await fn();
       await refresh();
       onChanged();
+      if (label) {
+        const detail =
+          typeof out === "string" && out.trim()
+            ? out.trim().split("\n").filter(Boolean).slice(-1)[0].slice(0, 80)
+            : "";
+        onToast?.(detail ? `${label} — ${detail}` : label);
+      }
     } catch (e) {
+      const msg = String(e).split("\n")[0].slice(0, 100);
       setError(String(e));
+      onToast?.(`${label ?? "Git"} failed: ${msg}`);
     } finally {
       setBusy(false);
     }
@@ -263,21 +274,21 @@ export default function GitSidebar({
             </span>
           )}
           <button
-            onClick={() => act(api.gitPull)}
+            onClick={() => act(api.gitPull, "Pulled")}
             disabled={busy}
             className="px-2 py-0.5 rounded bg-bg-elevated border border-border hover:bg-bg-hover"
           >
             Pull
           </button>
           <button
-            onClick={() => act(api.gitPush)}
+            onClick={() => act(api.gitPush, "Pushed")}
             disabled={busy}
             className="px-2 py-0.5 rounded bg-bg-elevated border border-border hover:bg-bg-hover"
           >
             Push
           </button>
           <button
-            onClick={() => act(api.gitStash)}
+            onClick={() => act(api.gitStash, "Stashed")}
             disabled={busy}
             className="px-2 py-0.5 rounded bg-bg-elevated border border-border hover:bg-bg-hover"
           >
@@ -427,11 +438,11 @@ export default function GitSidebar({
         <button
           onClick={() =>
             act(async () => {
-              if (amend) await api.gitAmend(message);
-              else await api.gitCommit(message);
+              const r = amend ? await api.gitAmend(message) : await api.gitCommit(message);
               setMessage("");
               setAmend(false);
-            })
+              return r;
+            }, amend ? "Amended" : "Committed")
           }
           disabled={
             busy ||

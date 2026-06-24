@@ -9,6 +9,7 @@ export default function StatusBar({
   branch,
   onToggleTerminal,
   onGitChanged,
+  onToast,
 }: {
   summary: ProjectSummary | null;
   activePath: string | null;
@@ -17,6 +18,7 @@ export default function StatusBar({
   branch: string | null;
   onToggleTerminal: () => void;
   onGitChanged?: () => void;
+  onToast?: (msg: string) => void;
 }) {
   const [stats, setStats] = useState<{ php_version: string; memory_mb: number } | null>(null);
   const [hub, setHub] = useState<{ branches: { name: string; current: boolean }[]; ahead: number; behind: number } | null>(null);
@@ -38,16 +40,18 @@ export default function StatusBar({
     try {
       await api.gitCheckout(name);
       onGitChanged?.();
-    } catch {
-      /* */
+      onToast?.(`Switched to ${name}`);
+    } catch (e) {
+      onToast?.(`Checkout failed: ${String(e).split("\n")[0].slice(0, 80)}`);
     }
   };
   const openPr = async () => {
     setHub(null);
     try {
       await api.openExternal(await api.gitPrUrl());
-    } catch {
-      /* */
+      onToast?.("Opening pull request in browser…");
+    } catch (e) {
+      onToast?.(`PR failed: ${String(e).split("\n")[0].slice(0, 80)}`);
     }
   };
   useEffect(() => {
@@ -144,7 +148,7 @@ export default function StatusBar({
         <span
           className="inline-flex items-center justify-center w-[18px] h-[18px] rounded-[5px] bg-accent text-white font-semibold leading-none"
           style={{ fontSize: "10px" }}
-          title="Photon IDE 2.13"
+          title="Photon IDE 2.16"
         >
           P
         </span>

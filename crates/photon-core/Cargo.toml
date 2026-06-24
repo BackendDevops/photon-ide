@@ -17,3 +17,4 @@ walkdir = { workspace = true }
 ignore = { workspace = true }
 tree-sitter = { workspace = true }
 tree-sitter-php = { workspace = true }
+rayon = "1.10"

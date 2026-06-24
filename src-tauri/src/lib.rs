@@ -21,7 +21,7 @@ use photon_core::{
     ChangeSet, Engine, FileEntry, Index, KeyEntry, MissingTranslation, ModelInfo, ProjectSummary,
     Reference, Route, SearchHit, Symbol,
 };
-use std::sync::Mutex;
+use parking_lot::Mutex;
 use tauri::menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder};
 use tauri::{AppHandle, Emitter, Manager, State};
 use terminal::Terminals;
@@ -40,7 +40,7 @@ fn err<E: std::fmt::Display>(e: E) -> String {
 }
 
 fn project_root(state: &State<'_, AppState>) -> CmdResult<String> {
-    let guard = state.engine.lock().unwrap();
+    let guard = state.engine.lock();
     let engine = guard.as_ref().ok_or("No project open")?;
     engine
         .workspace
@@ -82,7 +82,7 @@ fn open_project(
     state: State<'_, AppState>,
 ) -> CmdResult<ProjectSummary> {
     let summary = {
-        let mut guard = state.engine.lock().unwrap();
+        let mut guard = state.engine.lock();
         match guard.as_mut() {
             Some(engine) => engine.add_project_reconcile(path.clone()).map_err(err)?,
             None => {
@@ -101,7 +101,7 @@ fn open_project(
 /// Re-index a single workspace path after an external filesystem change.
 #[tauri::command]
 fn reindex_path(path: String, state: State<'_, AppState>) -> CmdResult<()> {
-    let mut guard = state.engine.lock().unwrap();
+    let mut guard = state.engine.lock();
     let engine = guard.as_mut().ok_or("No project open")?;
     engine.reindex_path(&path).map_err(err)
 }
@@ -159,7 +159,7 @@ fn start_root_watcher(app: &AppHandle, state: &State<'_, AppState>, path: &str) 
     use notify::{RecursiveMode, Watcher};
 
     let label = {
-        let guard = state.engine.lock().unwrap();
+        let guard = state.engine.lock();
         match guard.as_ref() {
             Some(engine) => engine.projects().into_iter().find(|r| r.path == *path).map(|r| r.label),
             None => None,
@@ -170,7 +170,7 @@ fn start_root_watcher(app: &AppHandle, state: &State<'_, AppState>, path: &str) 
         None => return,
     };
     {
-        let watchers = state.watchers.lock().unwrap();
+        let watchers = state.watchers.lock();
         if watchers.contains_key(&label) {
             return;
         }
@@ -190,7 +190,7 @@ fn start_root_watcher(app: &AppHandle, state: &State<'_, AppState>, path: &str) 
     if watcher.watch(&root, RecursiveMode::Recursive).is_err() {
         return;
     }
-    state.watchers.lock().unwrap().insert(label.clone(), watcher);
+    state.watchers.lock().insert(label.clone(), watcher);
 
     let app = app.clone();
     std::thread::spawn(move || {
@@ -221,15 +221,15 @@ fn start_root_watcher(app: &AppHandle, state: &State<'_, AppState>, path: &str) 
 #[tauri::command]
 fn close_project(label: String, state: State<'_, AppState>) -> CmdResult<ProjectSummary> {
     // Dropping the watcher disconnects its channel; its thread then exits.
-    state.watchers.lock().unwrap().remove(&label);
-    let mut guard = state.engine.lock().unwrap();
+    state.watchers.lock().remove(&label);
+    let mut guard = state.engine.lock();
     let engine = guard.as_mut().ok_or("No project open")?;
     engine.close_project(&label).map_err(err)
 }
 
 #[tauri::command]
 fn list_projects(state: State<'_, AppState>) -> CmdResult<Vec<photon_core::RootInfo>> {
-    let guard = state.engine.lock().unwrap();
+    let guard = state.engine.lock();
     Ok(guard.as_ref().map(|e| e.projects()).unwrap_or_default())
 }
 
@@ -237,20 +237,20 @@ fn list_projects(state: State<'_, AppState>) -> CmdResult<Vec<photon_core::RootI
 /// AFTER open_project so initial open stays fast; runs on a worker thread.
 #[tauri::command]
 fn index_vendor(state: State<'_, AppState>) -> CmdResult<u32> {
-    let mut guard = state.engine.lock().unwrap();
+    let mut guard = state.engine.lock();
     let engine = guard.as_mut().ok_or("No project open")?;
     engine.index_vendor().map_err(err)
 }
 
 #[tauri::command]
 fn list_files(state: State<'_, AppState>) -> CmdResult<Vec<FileEntry>> {
-    let guard = state.engine.lock().unwrap();
+    let guard = state.engine.lock();
     Ok(guard.as_ref().ok_or("No project open")?.workspace.list_files())
 }
 
 #[tauri::command]
 fn read_file(path: String, state: State<'_, AppState>) -> CmdResult<String> {
-    let guard = state.engine.lock().unwrap();
+    let guard = state.engine.lock();
     guard
         .as_ref()
         .ok_or("No project open")?
@@ -261,7 +261,7 @@ fn read_file(path: String, state: State<'_, AppState>) -> CmdResult<String> {
 
 #[tauri::command]
 fn save_file(path: String, contents: String, state: State<'_, AppState>) -> CmdResult<()> {
-    let mut guard = state.engine.lock().unwrap();
+    let mut guard = state.engine.lock();
     let engine = guard.as_mut().ok_or("No project open")?;
     engine.workspace.write_file(&path, &contents).map_err(err)?;
     engine.reindex_file(&path).map_err(err)?;
@@ -330,7 +330,7 @@ fn snapshot_save(engine: &Engine, wpath: &str, contents: &str) {
 /// Snapshot timestamps (ms) for a file, newest first.
 #[tauri::command]
 fn history_list(path: String, state: State<'_, AppState>) -> CmdResult<Vec<i64>> {
-    let guard = state.engine.lock().unwrap();
+    let guard = state.engine.lock();
     let engine = guard.as_ref().ok_or("No project open")?;
     let dir = match history_root(engine) {
         Some(r) => r.join(encode_path(&path)),
@@ -350,7 +350,7 @@ fn history_list(path: String, state: State<'_, AppState>) -> CmdResult<Vec<i64>>
 /// The content of one snapshot.
 #[tauri::command]
 fn history_get(path: String, ts: i64, state: State<'_, AppState>) -> CmdResult<String> {
-    let guard = state.engine.lock().unwrap();
+    let guard = state.engine.lock();
     let engine = guard.as_ref().ok_or("No project open")?;
     let dir = history_root(engine).ok_or("No project open")?.join(encode_path(&path));
     std::fs::read_to_string(dir.join(format!("{ts}.snap"))).map_err(err)
@@ -358,7 +358,7 @@ fn history_get(path: String, ts: i64, state: State<'_, AppState>) -> CmdResult<S
 
 #[tauri::command]
 fn file_symbols(path: String, state: State<'_, AppState>) -> CmdResult<Vec<Symbol>> {
-    let guard = state.engine.lock().unwrap();
+    let guard = state.engine.lock();
     guard
         .as_ref()
         .ok_or("No project open")?
@@ -369,14 +369,14 @@ fn file_symbols(path: String, state: State<'_, AppState>) -> CmdResult<Vec<Symbo
 
 #[tauri::command]
 fn search_everywhere(query: String, state: State<'_, AppState>) -> CmdResult<Vec<SearchHit>> {
-    let guard = state.engine.lock().unwrap();
+    let guard = state.engine.lock();
     let engine = guard.as_ref().ok_or("No project open")?;
     Ok(photon_core::search::search_everywhere(&engine.index, &query, 50))
 }
 
 #[tauri::command]
 fn list_routes(state: State<'_, AppState>) -> CmdResult<Vec<Route>> {
-    let guard = state.engine.lock().unwrap();
+    let guard = state.engine.lock();
     guard.as_ref().ok_or("No project open")?.index.routes().map_err(err)
 }
 
@@ -384,13 +384,13 @@ fn list_routes(state: State<'_, AppState>) -> CmdResult<Vec<Route>> {
 
 #[tauri::command]
 fn goto_symbol(name: String, state: State<'_, AppState>) -> CmdResult<Vec<Symbol>> {
-    let guard = state.engine.lock().unwrap();
+    let guard = state.engine.lock();
     guard.as_ref().ok_or("No project open")?.index.find_symbol(&name).map_err(err)
 }
 
 #[tauri::command]
 fn find_usages(name: String, state: State<'_, AppState>) -> CmdResult<Vec<Reference>> {
-    let guard = state.engine.lock().unwrap();
+    let guard = state.engine.lock();
     guard
         .as_ref()
         .ok_or("No project open")?
@@ -401,7 +401,7 @@ fn find_usages(name: String, state: State<'_, AppState>) -> CmdResult<Vec<Refere
 
 #[tauri::command]
 fn plan_rename(old: String, new_name: String, state: State<'_, AppState>) -> CmdResult<ChangeSet> {
-    let guard = state.engine.lock().unwrap();
+    let guard = state.engine.lock();
     guard
         .as_ref()
         .ok_or("No project open")?
@@ -411,7 +411,7 @@ fn plan_rename(old: String, new_name: String, state: State<'_, AppState>) -> Cmd
 
 #[tauri::command]
 fn plan_move_class(class: String, new_ns: String, state: State<'_, AppState>) -> CmdResult<ChangeSet> {
-    let guard = state.engine.lock().unwrap();
+    let guard = state.engine.lock();
     guard
         .as_ref()
         .ok_or("No project open")?
@@ -426,7 +426,7 @@ fn plan_change_signature(
     new_params: String,
     state: State<'_, AppState>,
 ) -> CmdResult<ChangeSet> {
-    let guard = state.engine.lock().unwrap();
+    let guard = state.engine.lock();
     guard
         .as_ref()
         .ok_or("No project open")?
@@ -437,7 +437,7 @@ fn plan_change_signature(
 /// PSR-4 autoload prefixes → directories from the primary project's composer.json.
 #[tauri::command]
 fn psr4_map(state: State<'_, AppState>) -> CmdResult<Vec<(String, String)>> {
-    let guard = state.engine.lock().unwrap();
+    let guard = state.engine.lock();
     let engine = guard.as_ref().ok_or("No project open")?;
     let root = match engine.workspace.primary_path() {
         Some(r) => r.to_path_buf(),
@@ -476,7 +476,7 @@ fn apply_rename(
     accepted: Option<Vec<usize>>,
     state: State<'_, AppState>,
 ) -> CmdResult<u32> {
-    let mut guard = state.engine.lock().unwrap();
+    let mut guard = state.engine.lock();
     let engine = guard.as_mut().ok_or("No project open")?;
     engine
         .apply_changeset(&changeset, accepted.as_deref())
@@ -492,7 +492,7 @@ fn refactor_extract_variable(
     line: u32,
     state: State<'_, AppState>,
 ) -> CmdResult<ChangeSet> {
-    let guard = state.engine.lock().unwrap();
+    let guard = state.engine.lock();
     let engine = guard.as_ref().ok_or("No project open")?;
     let content = engine.workspace.read_file(&file).map_err(err)?;
     Ok(photon_core::refactor::plan_extract_variable(
@@ -506,7 +506,7 @@ fn refactor_inline_variable(
     var: String,
     state: State<'_, AppState>,
 ) -> CmdResult<ChangeSet> {
-    let guard = state.engine.lock().unwrap();
+    let guard = state.engine.lock();
     let engine = guard.as_ref().ok_or("No project open")?;
     let content = engine.workspace.read_file(&file).map_err(err)?;
     Ok(photon_core::refactor::plan_inline_variable(&content, &file, &var))
@@ -514,7 +514,7 @@ fn refactor_inline_variable(
 
 #[tauri::command]
 fn refactor_safe_delete(name: String, state: State<'_, AppState>) -> CmdResult<ChangeSet> {
-    let guard = state.engine.lock().unwrap();
+    let guard = state.engine.lock();
     let engine = guard.as_ref().ok_or("No project open")?;
     let refs = engine.index.references_to(&name).map_err(err)?;
     if !refs.is_empty() {
@@ -576,7 +576,7 @@ fn refactor_extract_method(
     line: u32,
     state: State<'_, AppState>,
 ) -> CmdResult<ChangeSet> {
-    let guard = state.engine.lock().unwrap();
+    let guard = state.engine.lock();
     let engine = guard.as_ref().ok_or("No project open")?;
     let content = engine.workspace.read_file(&file).map_err(err)?;
     let symbols = engine.index.symbols_in_file(&file).unwrap_or_default();
@@ -611,7 +611,7 @@ fn refactor_extract_method(
 /// (typed, from migrations) and relations, inserted above the class.
 #[tauri::command]
 fn generate_model_phpdoc(file: String, state: State<'_, AppState>) -> CmdResult<ChangeSet> {
-    let guard = state.engine.lock().unwrap();
+    let guard = state.engine.lock();
     let engine = guard.as_ref().ok_or("No project open")?;
     let m = engine
         .index
@@ -868,7 +868,7 @@ fn goto_member_def(
     member: String,
     state: State<'_, AppState>,
 ) -> CmdResult<Option<photon_core::Location>> {
-    let guard = state.engine.lock().unwrap();
+    let guard = state.engine.lock();
     let engine = guard.as_ref().ok_or("No project open")?;
     if let Some(class) = resolve_chain_class(engine, &file, offset, &chain) {
         let mut queue = vec![class];
@@ -912,7 +912,7 @@ fn goto_type(
     chain: String,
     state: State<'_, AppState>,
 ) -> CmdResult<Option<photon_core::Location>> {
-    let guard = state.engine.lock().unwrap();
+    let guard = state.engine.lock();
     let engine = guard.as_ref().ok_or("No project open")?;
     let class = match resolve_chain_class(engine, &file, offset, &chain) {
         Some(c) => c,
@@ -942,7 +942,7 @@ fn member_completions(
     receiver: String,
     state: State<'_, AppState>,
 ) -> CmdResult<Vec<Symbol>> {
-    let guard = state.engine.lock().unwrap();
+    let guard = state.engine.lock();
     let engine = guard.as_ref().ok_or("No project open")?;
 
     let class = match resolve_chain_class(engine, &file, offset, &receiver) {
@@ -1177,7 +1177,7 @@ fn class_parent(source: &str, class: &str) -> Option<String> {
 /// Types that implement/extend `name`, as a usages-popup result.
 #[tauri::command]
 fn goto_implementations(name: String, state: State<'_, AppState>) -> CmdResult<photon_core::UsagesResult> {
-    let guard = state.engine.lock().unwrap();
+    let guard = state.engine.lock();
     let engine = guard.as_ref().ok_or("No project open")?;
     let impls = engine.index.implementations_of(&name).unwrap_or_default();
     let mut hits = Vec::new();
@@ -1215,7 +1215,7 @@ fn goto_implementations(name: String, state: State<'_, AppState>) -> CmdResult<p
 
 #[tauri::command]
 fn usages_popup(name: String, state: State<'_, AppState>) -> CmdResult<photon_core::UsagesResult> {
-    let guard = state.engine.lock().unwrap();
+    let guard = state.engine.lock();
     let engine = guard.as_ref().ok_or("No project open")?;
     let refs = engine.index.references_to(&name).map_err(err)?;
     let def = engine.index.find_symbol(&name).ok().and_then(|d| d.into_iter().next());
@@ -1387,25 +1387,25 @@ fn cap(s: &str) -> String {
 
 #[tauri::command]
 fn list_models(state: State<'_, AppState>) -> CmdResult<Vec<ModelInfo>> {
-    let guard = state.engine.lock().unwrap();
+    let guard = state.engine.lock();
     guard.as_ref().ok_or("No project open")?.index.models().map_err(err)
 }
 
 #[tauri::command]
 fn config_key(key: String, state: State<'_, AppState>) -> CmdResult<Option<KeyEntry>> {
-    let guard = state.engine.lock().unwrap();
+    let guard = state.engine.lock();
     guard.as_ref().ok_or("No project open")?.index.config_key(&key).map_err(err)
 }
 
 #[tauri::command]
 fn translation(key: String, state: State<'_, AppState>) -> CmdResult<Vec<KeyEntry>> {
-    let guard = state.engine.lock().unwrap();
+    let guard = state.engine.lock();
     guard.as_ref().ok_or("No project open")?.index.translation(&key).map_err(err)
 }
 
 #[tauri::command]
 fn missing_translations(state: State<'_, AppState>) -> CmdResult<Vec<MissingTranslation>> {
-    let guard = state.engine.lock().unwrap();
+    let guard = state.engine.lock();
     guard
         .as_ref()
         .ok_or("No project open")?
@@ -1421,7 +1421,7 @@ fn goto_laravel_key(
     key: String,
     state: State<'_, AppState>,
 ) -> CmdResult<Option<photon_core::Location>> {
-    let guard = state.engine.lock().unwrap();
+    let guard = state.engine.lock();
     let engine = guard.as_ref().ok_or("No project open")?;
     let loc = match kind.as_str() {
         "config" => engine
@@ -1464,7 +1464,7 @@ fn goto_laravel_key(
 /// Navigate from a bound abstract (`app(Foo::class)`) to its concrete binding.
 #[tauri::command]
 fn goto_binding(name: String, state: State<'_, AppState>) -> CmdResult<Option<photon_core::Location>> {
-    let guard = state.engine.lock().unwrap();
+    let guard = state.engine.lock();
     let engine = guard.as_ref().ok_or("No project open")?;
     let binds = engine.index.bindings().unwrap_or_default();
     let b = binds.into_iter().find(|b| {
@@ -1489,25 +1489,25 @@ fn goto_binding(name: String, state: State<'_, AppState>) -> CmdResult<Option<ph
 
 #[tauri::command]
 fn list_bindings(state: State<'_, AppState>) -> CmdResult<Vec<photon_core::Binding>> {
-    let guard = state.engine.lock().unwrap();
+    let guard = state.engine.lock();
     guard.as_ref().ok_or("No project open")?.index.bindings().map_err(err)
 }
 
 #[tauri::command]
 fn list_events(state: State<'_, AppState>) -> CmdResult<Vec<photon_core::EventListener>> {
-    let guard = state.engine.lock().unwrap();
+    let guard = state.engine.lock();
     guard.as_ref().ok_or("No project open")?.index.events().map_err(err)
 }
 
 #[tauri::command]
 fn list_jobs(state: State<'_, AppState>) -> CmdResult<Vec<photon_core::JobInfo>> {
-    let guard = state.engine.lock().unwrap();
+    let guard = state.engine.lock();
     guard.as_ref().ok_or("No project open")?.index.jobs().map_err(err)
 }
 
 #[tauri::command]
 fn list_artifacts(state: State<'_, AppState>) -> CmdResult<Vec<photon_core::ArtifactInfo>> {
-    let guard = state.engine.lock().unwrap();
+    let guard = state.engine.lock();
     guard.as_ref().ok_or("No project open")?.index.artifacts().map_err(err)
 }
 
@@ -1515,7 +1515,7 @@ fn list_artifacts(state: State<'_, AppState>) -> CmdResult<Vec<photon_core::Arti
 
 #[tauri::command]
 fn lint_file(path: String, state: State<'_, AppState>) -> CmdResult<Vec<photon_core::Diagnostic>> {
-    let guard = state.engine.lock().unwrap();
+    let guard = state.engine.lock();
     let engine = guard.as_ref().ok_or("No project open")?;
     if !path.ends_with(".php") {
         return Ok(vec![]);
@@ -1966,7 +1966,7 @@ fn invalid_overrides(
 /// powering named-argument completion.
 #[tauri::command]
 fn call_params(name: String, state: State<'_, AppState>) -> CmdResult<Vec<String>> {
-    let guard = state.engine.lock().unwrap();
+    let guard = state.engine.lock();
     let engine = guard.as_ref().ok_or("No project open")?;
     let short = name.rsplit('\\').next().unwrap_or(&name).to_string();
     let defs = engine.index.find_symbol(&short).unwrap_or_default();
@@ -2024,7 +2024,7 @@ struct SymbolDoc {
 /// parameters, return type, description, and source path.
 #[tauri::command]
 fn symbol_doc(name: String, state: State<'_, AppState>) -> CmdResult<Option<SymbolDoc>> {
-    let guard = state.engine.lock().unwrap();
+    let guard = state.engine.lock();
     let engine = guard.as_ref().ok_or("No project open")?;
     let short = name.rsplit('\\').next().unwrap_or(&name).to_string();
     let def = engine
@@ -2082,7 +2082,7 @@ struct ReturnFix {
 /// name is on `line` (drives the "Add return type" quick-fix).
 #[tauri::command]
 fn return_type_fix(path: String, line: u32, state: State<'_, AppState>) -> CmdResult<Option<ReturnFix>> {
-    let guard = state.engine.lock().unwrap();
+    let guard = state.engine.lock();
     let engine = guard.as_ref().ok_or("No project open")?;
     let src = engine.workspace.read_file(&path).map_err(err)?;
     let s = match photon_core::php::analyze_return(&src, line) {
@@ -2102,7 +2102,7 @@ fn return_type_fix(path: String, line: u32, state: State<'_, AppState>) -> CmdRe
 /// `resources/views/` — completion + nav for `view()`, `@extends`, `@include`.
 #[tauri::command]
 fn blade_views(state: State<'_, AppState>) -> CmdResult<Vec<String>> {
-    let guard = state.engine.lock().unwrap();
+    let guard = state.engine.lock();
     let engine = guard.as_ref().ok_or("No project open")?;
     let mut out: Vec<String> = Vec::new();
     for fe in engine.workspace.list_files() {
@@ -2126,14 +2126,14 @@ fn blade_views(state: State<'_, AppState>) -> CmdResult<Vec<String>> {
 /// PHP string literals.
 #[tauri::command]
 fn schema_tables(state: State<'_, AppState>) -> CmdResult<Vec<(String, Vec<String>)>> {
-    let guard = state.engine.lock().unwrap();
+    let guard = state.engine.lock();
     let engine = guard.as_ref().ok_or("No project open")?;
     engine.index.tables_with_columns().map_err(err)
 }
 
 #[tauri::command]
 fn completion_data(state: State<'_, AppState>) -> CmdResult<photon_core::CompletionData> {
-    let guard = state.engine.lock().unwrap();
+    let guard = state.engine.lock();
     let engine = guard.as_ref().ok_or("No project open")?;
     let routes = engine.index.routes().unwrap_or_default();
     let configs = engine.index.config_key_candidates("", 2000).unwrap_or_default();
@@ -2288,7 +2288,7 @@ fn debug_set_breakpoint(
     dbg: State<'_, debugger::DebugState>,
 ) -> CmdResult<()> {
     let abs = {
-        let guard = state.engine.lock().unwrap();
+        let guard = state.engine.lock();
         guard
             .as_ref()
             .and_then(|e| e.workspace.abs_path(&path))
@@ -2315,7 +2315,7 @@ fn debug_remove_breakpoint(
     dbg: State<'_, debugger::DebugState>,
 ) -> CmdResult<()> {
     let abs = {
-        let guard = state.engine.lock().unwrap();
+        let guard = state.engine.lock();
         guard
             .as_ref()
             .and_then(|e| e.workspace.abs_path(&path))
@@ -2341,7 +2341,7 @@ fn debug_property(name: String, dbg: State<'_, debugger::DebugState>) -> CmdResu
 /// can open it.
 #[tauri::command]
 fn path_to_workspace(abs: String, state: State<'_, AppState>) -> CmdResult<Option<String>> {
-    let guard = state.engine.lock().unwrap();
+    let guard = state.engine.lock();
     Ok(guard.as_ref().and_then(|e| e.workspace.wpath_of_abs(&abs)))
 }
 
@@ -2680,7 +2680,7 @@ fn detect_php_version(root: Option<&str>) -> String {
 fn system_stats(state: State<'_, AppState>) -> CmdResult<SystemStats> {
     use sysinfo::{ProcessRefreshKind, System};
     let (root, indexed) = {
-        let guard = state.engine.lock().unwrap();
+        let guard = state.engine.lock();
         match guard.as_ref() {
             Some(e) => (
                 e.workspace.primary_path().map(|p| p.to_string_lossy().to_string()),
@@ -2862,7 +2862,7 @@ fn template_create(
     vars: HashMap<String, String>,
     state: State<'_, AppState>,
 ) -> CmdResult<String> {
-    let mut guard = state.engine.lock().unwrap();
+    let mut guard = state.engine.lock();
     let engine = guard.as_mut().ok_or("No project open")?;
     // New files go into the primary (first) project root.
     let primary = engine.workspace.roots.first().ok_or("No project open")?;

@@ -64,7 +64,11 @@ export default function App() {
 
   const [tabs, setTabs] = useState<{ path: string }[]>([]);
   const [active, setActive] = useState<string | null>(null);
-  const [buffers, setBuffers] = useState<Record<string, string>>({});
+  // Buffers live in a ref so keystroke handlers never trigger React re-renders.
+  // `setBuffers` (state) has been removed; render-time reads use buffersRef.current.
+  const buffersRef = useRef<Record<string, string>>({});
+  const syncTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const autoSaveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [dirty, setDirty] = useState<Record<string, boolean>>({});
   const [symbols, setSymbols] = useState<Symbol[]>([]);
 
@@ -190,11 +194,19 @@ export default function App() {
   // Zero-Mouse Flow — which UI region currently holds keyboard focus (F6 cycles).
   const [focusRegion, setFocusRegion] = useState<"sidebar" | "editor" | "dock" | "right">("editor");
   const [prompt, setPrompt] = useState<{ label: string; value: string; onOk: (v: string) => void } | null>(null);
-  const [toast, setToast] = useState<string | null>(null);
+  const [toasts, setToasts] = useState<{ id: number; msg: string; kind: "success" | "error" | "info" }[]>([]);
 
-  const showToast = useCallback((msg: string) => {
-    setToast(msg);
-    setTimeout(() => setToast(null), 2600);
+  const showToast = useCallback((msg: string, kind?: "success" | "error" | "info") => {
+    const k =
+      kind ??
+      (/(fail|error|denied|unable|could not|conflict|✕)/i.test(msg)
+        ? "error"
+        : /(✓|passed|connected|pushed|pulled|committed|amended|switched|created|renamed|moved|inlined|deleted|generated|stashed|extracted|updated|restored|indexed|saved)/i.test(msg)
+        ? "success"
+        : "info");
+    const id = Date.now() + Math.random();
+    setToasts((list) => [...list, { id, msg, kind: k }].slice(-4));
+    setTimeout(() => setToasts((list) => list.filter((t) => t.id !== id)), 3400);
   }, []);
 
   // Test ▶ glyphs: methods/classes in a test file.
@@ -222,13 +234,17 @@ export default function App() {
     [active, symbols, showToast]
   );
 
-  // Auto-save: after the configured idle, persist the active dirty buffer.
+  // Clear any pending autosave/sync timers when the active tab/file changes.
   useEffect(() => {
-    if (!settings.autoSave || !active || !dirty[active]) return;
-    const t = setTimeout(() => void save(), settings.autoSaveDelayMs);
-    return () => clearTimeout(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active, buffers, dirty, settings.autoSave, settings.autoSaveDelayMs]);
+    return () => {
+      if (autoSaveTimeoutRef.current) {
+        clearTimeout(autoSaveTimeoutRef.current);
+      }
+      if (syncTimeoutRef.current) {
+        clearTimeout(syncTimeoutRef.current);
+      }
+    };
+  }, [active]);
 
   // NOTE: CSS `zoom` breaks Monaco's mouse hit-testing (clicks land at the
   // wrong caret position). We clear any previously-applied zoom and scale the
@@ -309,10 +325,16 @@ export default function App() {
 
   const openFile = useCallback(
     async (path: string, line?: number) => {
-      if (buffers[path] === undefined) {
+      // Cancel any pending debounced sync when switching files.
+      if (syncTimeoutRef.current) {
+        clearTimeout(syncTimeoutRef.current);
+        syncTimeoutRef.current = null;
+      }
+
+      if (buffersRef.current[path] === undefined) {
         try {
           const content = await api.readFile(path);
-          setBuffers((b) => ({ ...b, [path]: content }));
+          buffersRef.current[path] = content;
         } catch (e) {
           console.error(e);
           return;
@@ -332,7 +354,7 @@ export default function App() {
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [buffers, refreshSymbols, sidebar]
+    [active, refreshSymbols, sidebar]
   );
 
   const closeTab = (path: string) => {
@@ -381,16 +403,11 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [branch, summary?.root]);
 
-  const onEditorChange = (v: string) => {
-    if (!active) return;
-    setBuffers((b) => ({ ...b, [active]: v }));
-    setDirty((d) => ({ ...d, [active]: true }));
-  };
-
   const save = useCallback(async () => {
     if (!active) return;
+    const content = buffersRef.current[active] ?? "";
     try {
-      await api.saveFile(active, buffers[active] ?? "");
+      await api.saveFile(active, content);
       setDirty((d) => ({ ...d, [active]: false }));
       void refreshSymbols(active);
       setRoutes(await api.listRoutes());
@@ -398,7 +415,31 @@ export default function App() {
     } catch (e) {
       console.error(e);
     }
-  }, [active, buffers, refreshSymbols]);
+  }, [active, refreshSymbols]);
+
+  const onEditorChange = useCallback((v: string) => {
+    if (!active) return;
+    buffersRef.current[active] = v;
+    // Use functional update so we don't need `dirty` in the dependency list,
+    // preventing the closure from re-creating on every state change.
+    setDirty((d) => d[active] ? d : { ...d, [active]: true });
+
+    // 400ms debounce: only triggers re-render for outline/AI panels that need
+    // buffer content — editor itself reads from buffersRef.current directly.
+    if (syncTimeoutRef.current) clearTimeout(syncTimeoutRef.current);
+    syncTimeoutRef.current = setTimeout(() => {
+      // Force a render so dependents (e.g. AI panel) get the latest content.
+      setDirty((d) => ({ ...d }));
+    }, 400);
+
+    if (settings.autoSave) {
+      if (autoSaveTimeoutRef.current) clearTimeout(autoSaveTimeoutRef.current);
+      autoSaveTimeoutRef.current = setTimeout(() => {
+        void save();
+      }, settings.autoSaveDelayMs);
+    }
+  }, [active, settings.autoSave, settings.autoSaveDelayMs, save]);
+
 
   const gotoFileLine = useCallback((file: string, line: number) => void openFile(file, line), [openFile]);
 
@@ -411,13 +452,13 @@ export default function App() {
       );
     }
     if (active) {
-      const body = (buffers[active] ?? "").slice(0, 6000);
+      const body = (buffersRef.current[active] ?? "").slice(0, 6000);
       const lang = langOf(active);
       parts.push(`Active file: ${active}\n\`\`\`${lang}\n${body}\n\`\`\``);
     }
     return parts.join("\n\n");
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [summary, active, buffers]);
+  }, [summary, active]);
 
   // F12 → Go to Definition (resolves into vendor/framework symbols too).
   const gotoDefinition = useCallback(
@@ -535,16 +576,17 @@ export default function App() {
 
   const onRenameApplied = useCallback(async () => {
     const fresh: Record<string, string> = {};
-    for (const p of Object.keys(buffers)) {
+    for (const p of Object.keys(buffersRef.current)) {
       try {
-        fresh[p] = await api.readFile(p);
+        const content = await api.readFile(p);
+        fresh[p] = content;
+        buffersRef.current[p] = content;
       } catch {
         /* moved */
       }
     }
-    setBuffers((b) => ({ ...b, ...fresh }));
     if (active) void refreshSymbols(active);
-  }, [buffers, active, refreshSymbols]);
+  }, [active, refreshSymbols]);
 
   const openDiff = useCallback(async (file: string) => {
     try {
@@ -848,7 +890,7 @@ export default function App() {
         case "code_comment":
           showToast("Editor action — see docs/17 (full v2)");
           break;
-        case "about": showToast("Photon IDE 2.13 — native PHP/Laravel IDE"); break;
+        case "about": showToast("Photon IDE 2.16 — native PHP/Laravel IDE"); break;
         case "docs": showToast("See the docs/ folder in the project"); break;
       }
     });
@@ -876,7 +918,7 @@ export default function App() {
     return () => { un.then((f) => f()); };
   }, [active, refreshSymbols]);
 
-  const activeValue = active ? buffers[active] ?? "" : "";
+  const activeValue = active ? buffersRef.current[active] ?? "" : "";
   const activeLang = active ? monacoLang(langOf(active)) : "plaintext";
 
   const ActivityButton = ({ view, glyph, label }: { view: SidebarView; glyph: string; label: string }) => (
@@ -1060,6 +1102,7 @@ export default function App() {
                 onNewSource={() => setDbDialog({ open: true, initial: null })}
                 onEditSource={(ds) => setDbDialog({ open: true, initial: ds })}
                 onRunQuery={(connection, sql) => setBottom({ kind: "query", connection, sql })}
+                onToast={showToast}
               />
             ) : sidebar === "git" ? (
               <GitSidebar
@@ -1067,6 +1110,7 @@ export default function App() {
                 onOpenDiff={openDiff}
                 onOpenFile={(f) => void openFile(f)}
                 onResolveConflict={(f) => setConflictFile(f)}
+                onToast={showToast}
               />
             ) : sidebar === "debug" ? (
               <DebugPanel
@@ -1099,7 +1143,7 @@ export default function App() {
             <InlineRename
               oldName={renameTarget}
               onClose={() => setRenameTarget(null)}
-              onApplied={() => void onRenameApplied()}
+              onApplied={(n) => { void onRenameApplied(); showToast(`Renamed across ${n} file${n === 1 ? "" : "s"}`); }}
             />
           )}
           {sidebar === "git" ? (
@@ -1437,6 +1481,7 @@ export default function App() {
         branch={branch}
         onToggleTerminal={() => toggleTerminal()}
         onGitChanged={() => { setGitRefresh((n) => n + 1); void refreshBranch(); }}
+        onToast={showToast}
       />
 
       <SearchEverywhere
@@ -1476,7 +1521,7 @@ export default function App() {
           onDiff={async (ts) => {
             try {
               const snap = await api.historyGet(historyPath, ts);
-              setBottom({ kind: "diff", file: historyPath, original: snap, modified: buffers[historyPath] ?? "" });
+              setBottom({ kind: "diff", file: historyPath, original: snap, modified: buffersRef.current[historyPath] ?? "" });
               setHistoryPath(null);
             } catch (e) {
               showToast(String(e));
@@ -1486,7 +1531,7 @@ export default function App() {
             try {
               const snap = await api.historyGet(historyPath, ts);
               await api.saveFile(historyPath, snap);
-              setBuffers((b) => ({ ...b, [historyPath]: snap }));
+              buffersRef.current[historyPath] = snap;
               setLintKey((n) => n + 1);
               setHistoryPath(null);
               showToast("Restored from history");
@@ -1544,9 +1589,24 @@ export default function App() {
         />
       )}
 
-      {toast && (
-        <div className="fixed bottom-8 left-1/2 -translate-x-1/2 z-50 bg-bg-elevated border border-border rounded-lg px-4 py-2 text-sm text-fg shadow-2xl pop-in">
-          {toast}
+      {toasts.length > 0 && (
+        <div className="fixed bottom-8 left-1/2 -translate-x-1/2 z-50 flex flex-col items-center gap-2">
+          {toasts.map((t) => {
+            const color = t.kind === "error" ? "#f85149" : t.kind === "success" ? "#3fb950" : "#3574f0";
+            const icon = t.kind === "error" ? "✕" : t.kind === "success" ? "✓" : "›";
+            return (
+              <div
+                key={t.id}
+                onClick={() => setToasts((l) => l.filter((x) => x.id !== t.id))}
+                className="pop-in flex items-center gap-2 bg-bg-elevated border border-border rounded-lg pl-3 pr-4 py-2 text-sm text-fg shadow-2xl cursor-default"
+                style={{ borderLeft: `3px solid ${color}` }}
+                title="Dismiss"
+              >
+                <span className="font-semibold leading-none" style={{ color }}>{icon}</span>
+                <span className="max-w-[56vw] truncate">{t.msg}</span>
+              </div>
+            );
+          })}
         </div>
       )}
     </div>
