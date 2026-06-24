@@ -30,12 +30,9 @@ jobs:
             rust-targets: ""
     runs-on: ${{ matrix.platform }}
     steps:
-      - name: Enable long paths (Windows)
-        if: matrix.platform == 'windows-latest'
-        shell: pwsh
-        run: git config --system core.longpaths true
-
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Verify tag matches package version
         if: github.ref_type == 'tag'
@@ -55,6 +52,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: stable
           targets: ${{ matrix.rust-targets }}
 
       - uses: Swatinem/rust-cache@v2
@@ -83,12 +81,8 @@ jobs:
 
       - name: Build & release (Tauri)
         uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}
-          CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
-          CARGO_NET_RETRY: "5"
-          CARGO_NET_GIT_FETCH_WITH_CLI: "true"
         with:
+          github_token: ${{ secrets.RELEASE_PAT }}
           tagName: ${{ github.ref_type == 'tag' && github.ref_name || format('v{0}', github.run_number) }}
           releaseName: "Photon IDE ${{ github.ref_type == 'tag' && github.ref_name || github.run_number }}"
           releaseBody: "Download the installer for your platform below. See the README for build-from-source instructions."
