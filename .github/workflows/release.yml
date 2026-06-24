@@ -85,6 +85,9 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
+          CARGO_NET_RETRY: "5"
+          CARGO_NET_GIT_FETCH_WITH_CLI: "true"
         with:
           tagName: ${{ github.ref_type == 'tag' && github.ref_name || format('v{0}', github.run_number) }}
           releaseName: "Photon IDE ${{ github.ref_type == 'tag' && github.ref_name || github.run_number }}"
