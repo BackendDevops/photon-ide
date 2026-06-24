@@ -79,6 +79,8 @@ jobs:
 
       - name: Build & release (Tauri)
         uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PAT }}
         with:
           github_token: ${{ secrets.RELEASE_PAT }}
           tagName: ${{ github.ref_type == 'tag' && github.ref_name || format('v{0}', github.run_number) }}
