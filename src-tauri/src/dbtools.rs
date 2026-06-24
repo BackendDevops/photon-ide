@@ -10,8 +10,9 @@
 //! NOTE: result-cell decoding is best-effort across engines (tries text, then
 //! integer/float/bool). Verified against a live database, not the sandbox.
 
+use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use serde::{Deserialize, Serialize};
-use sqlx::{any::AnyPoolOptions, AnyPool, Column, Row};
+use sqlx::{any::AnyPoolOptions, AssertSqlSafe, AnyPool, Column, Row};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use tokio::sync::Mutex;
@@ -55,29 +56,25 @@ impl DataSource {
     }
 
     /// Build a sqlx connection URL, injecting `password` (overrides stored).
+    /// Credentials are percent-encoded so special chars (e.g. `@`, `:`, `/`)
+    /// don't corrupt URL parsing.
     pub fn url(&self, password: Option<&str>) -> String {
         let pw = password
             .map(|s| s.to_string())
             .or_else(|| self.password.clone())
             .unwrap_or_default();
         let port = if self.port == 0 { self.default_port() } else { self.port };
+        let enc = |s: &str| utf8_percent_encode(s, NON_ALPHANUMERIC).to_string();
         match self.driver.as_str() {
-            "sqlite" => {
-                let p = if self.sqlite_path.starts_with('/') {
-                    format!("sqlite://{}", self.sqlite_path)
-                } else {
-                    format!("sqlite://{}", self.sqlite_path)
-                };
-                format!("{p}?mode=rwc")
-            }
+            "sqlite" => format!("sqlite://{}?mode=rwc", self.sqlite_path),
             "postgres" => format!(
                 "postgres://{}:{}@{}:{}/{}",
-                self.user, pw, self.host, port, self.database
+                enc(&self.user), enc(&pw), self.host, port, self.database
             ),
             // mysql + mariadb share the mysql wire protocol.
             _ => format!(
                 "mysql://{}:{}@{}:{}/{}",
-                self.user, pw, self.host, port, self.database
+                enc(&self.user), enc(&pw), self.host, port, self.database
             ),
         }
     }
@@ -277,7 +274,7 @@ impl DbManager {
         let mut out = Vec::new();
         if engine == "sqlite" {
             let q = format!("PRAGMA table_info('{}')", table.replace('\'', "''"));
-            let rows = sqlx::query(&q).fetch_all(pool).await.map_err(|e| e.to_string())?;
+            let rows = sqlx::query(AssertSqlSafe(q)).fetch_all(pool).await.map_err(|e| e.to_string())?;
             for r in rows {
                 let name: String = r.try_get("name").unwrap_or_default();
                 let data_type: String = r.try_get("type").unwrap_or_default();
@@ -302,7 +299,7 @@ impl DbManager {
                 "SELECT column_name, data_type, is_nullable FROM information_schema.columns
                  WHERE {schema_filter} AND table_name = '{safe}' ORDER BY ordinal_position"
             );
-            let rows = sqlx::query(&q)
+            let rows = sqlx::query(AssertSqlSafe(q))
                 .fetch_all(pool)
                 .await
                 .map_err(|e| e.to_string())?;
@@ -323,6 +320,7 @@ impl DbManager {
     /// Run arbitrary SQL. SELECT-like returns rows; others return affected count.
     pub async fn query(&self, name: &str, sql: &str) -> Result<QueryResult, String> {
         let (pool, _engine) = self.get(name).await?;
+        let sql = sql.to_owned();
         let trimmed = sql.trim_start().to_lowercase();
         let is_read = trimmed.starts_with("select")
             || trimmed.starts_with("with")
@@ -331,7 +329,7 @@ impl DbManager {
             || trimmed.starts_with("explain");
 
         if is_read {
-            let rows = sqlx::query(sql).fetch_all(&pool).await.map_err(|e| e.to_string())?;
+            let rows = sqlx::query(AssertSqlSafe(sql)).fetch_all(&pool).await.map_err(|e| e.to_string())?;
             let mut columns: Vec<String> = Vec::new();
             if let Some(first) = rows.first() {
                 columns = first.columns().iter().map(|c| c.name().to_string()).collect();
@@ -352,7 +350,7 @@ impl DbManager {
                 affected: None,
             })
         } else {
-            let res = sqlx::query(sql).execute(&pool).await.map_err(|e| e.to_string())?;
+            let res = sqlx::query(AssertSqlSafe(sql)).execute(&pool).await.map_err(|e| e.to_string())?;
             Ok(QueryResult {
                 columns: vec!["result".into()],
                 rows: vec![vec![format!("{} row(s) affected", res.rows_affected())]],
@@ -378,7 +376,7 @@ impl DbManager {
         let (pool, engine) = self.get(name).await?;
         let (p1, p2) = if engine == "postgres" { ("$1", "$2") } else { ("?", "?") };
         let sql = format!("UPDATE {table} SET {column} = {p1} WHERE {pk_column} = {p2}");
-        let res = sqlx::query(&sql)
+        let res = sqlx::query(AssertSqlSafe(sql))
             .bind(value)
             .bind(pk_value)
             .execute(&pool)

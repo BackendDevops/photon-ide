@@ -269,7 +269,7 @@ export default function App() {
 
   const chooseFolder = useCallback(async () => {
     const picked = await openDialog({ directory: true, multiple: false });
-    if (!picked || typeof picked !== "string") return;
+    if (!picked) return;
     setIndexing(true);
     try {
       const s = await api.openProject(picked); // ADDS a root (multi-project)
@@ -333,8 +333,7 @@ export default function App() {
 
       if (buffersRef.current[path] === undefined) {
         try {
-          const content = await api.readFile(path);
-          buffersRef.current[path] = content;
+          buffersRef.current[path] = await api.readFile(path);
         } catch (e) {
           console.error(e);
           return;
@@ -393,9 +392,15 @@ export default function App() {
     try {
       const raw = localStorage.getItem(tabsKey(summary.root, branch));
       if (!raw) return;
-      const saved = JSON.parse(raw) as { tabs: string[]; active: string | null };
-      setTabs(saved.tabs.map((p) => ({ path: p })));
-      if (saved.active) void openFile(saved.active);
+      const saved = JSON.parse(raw);
+      if (
+        !saved ||
+        !Array.isArray(saved.tabs) ||
+        !saved.tabs.every((t: unknown) => typeof t === "string")
+      )
+        return;
+      setTabs(saved.tabs.map((p: string) => ({ path: p })));
+      if (typeof saved.active === "string") void openFile(saved.active);
       else setActive(null);
     } catch {
       /* ignore malformed memory */
@@ -1476,7 +1481,7 @@ export default function App() {
       <StatusBar
         summary={summary}
         activePath={active}
-        dirty={active ? !!dirty[active] : false}
+        dirty={!!(active && dirty[active])}
         indexing={indexing}
         branch={branch}
         onToggleTerminal={() => toggleTerminal()}

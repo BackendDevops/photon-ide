@@ -32,8 +32,9 @@ redis = "0.27"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 # Pillar 3 — Database tools (MySQL / PostgreSQL / SQLite via the Any driver)
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
-sqlx = { version = "0.8", default-features = false, features = [
-    "runtime-tokio-rustls",
+sqlx = { version = "0.9", default-features = false, features = [
+    "runtime-tokio",
+    "tls-rustls-ring",
     "any",
     "mysql",
     "postgres",
@@ -43,6 +44,8 @@ sqlx = { version = "0.8", default-features = false, features = [
 # rusqlite::Connection is Send but NOT Sync (uses RefCell internally), so we
 # MUST use Mutex (not RwLock) which only requires T: Send on the guarded type.
 parking_lot = "0.12"
+# URL-encode credentials in connection strings (already in dep tree via reqwest)
+percent-encoding = "2"
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]

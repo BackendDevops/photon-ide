@@ -3,7 +3,7 @@ members = ["crates/photon-core", "src-tauri"]
 resolver = "2"
 
 [workspace.package]
-version = "2.17.0"
+version = "2.18.0"
 edition = "2021"
 license = "MIT"
 authors = ["Photon IDE"]
@@ -13,7 +13,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
 thiserror = "1"
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
 walkdir = "2"
 ignore = "0.4"
 tree-sitter = "0.23"
