@@ -35,7 +35,7 @@ jobs:
         shell: pwsh
         run: git config --system core.longpaths true
 
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v4
 
       - name: Verify tag matches package version
         if: github.ref_type == 'tag'
@@ -48,7 +48,7 @@ jobs:
           fi
           echo "Tag matches package version: $PKG"
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
