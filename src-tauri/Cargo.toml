@@ -40,6 +40,8 @@ sqlx = { version = "0.9", default-features = false, features = [
     "postgres",
     "sqlite",
 ] }
+# Concurrent HashMap — lock-free reads for the hover cache.
+dashmap = "6"
 # Fast mutex — 2-4x faster than std::sync::Mutex for short critical sections.
 # rusqlite::Connection is Send but NOT Sync (uses RefCell internally), so we
 # MUST use Mutex (not RwLock) which only requires T: Send on the guarded type.

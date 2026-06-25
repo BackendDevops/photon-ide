@@ -8,6 +8,7 @@
 //! See the architecture docs in `docs/` for the full design this implements.
 
 pub mod db;
+pub mod hover;
 pub mod indexer;
 pub mod infer;
 pub mod inspect;
@@ -16,16 +17,18 @@ pub mod php;
 pub mod phpdoc;
 pub mod refactor;
 pub mod search;
+pub mod selection;
 pub mod types;
 pub mod workspace;
 
 pub use db::Index;
 pub use indexer::Engine;
+pub use selection::SelectionRange;
 pub use types::{
     ArtifactInfo, Binding, ChangeSet, CompletionData, Diagnostic, EventListener, FileEntry,
-    JobInfo, KeyEntry, Location, MissingTranslation, ModelInfo, ProjectSummary, RefKind,
-    Reference, RelationInfo, RootInfo, Route, SearchHit, Symbol, SymbolKind, TextEdit, UsageHit,
-    UsagesResult,
+    FileDiagnostics, JobInfo, KeyEntry, Location, MissingTranslation, ModelInfo, ProjectSummary,
+    RefKind, Reference, RelationInfo, RootInfo, Route, SearchHit, Symbol, SymbolKind, TextEdit,
+    UsageHit, UsagesResult,
 };
 
 #[cfg(test)]

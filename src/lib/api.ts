@@ -425,6 +425,25 @@ export const api = {
 
   // diagnostics + completion
   lintFile: (path: string) => invoke<Diagnostic[]>("lint_file", { path }),
+  /** Fast on-type diagnostics on the live buffer (~2ms, synchronous). */
+  lintContent: (path: string, content: string) =>
+    invoke<Diagnostic[]>("lint_content", { path, content }),
+  /** Fire-and-forget: results arrive as "diagnostics" Tauri events. */
+  lintContentDeep: (path: string, content: string) =>
+    invoke<void>("lint_content_deep", { path, content }),
+  /** Position-aware hover: resolves $var→Class::member before lookup. */
+  hoverAt: (path: string, content: string, line: number, col: number) =>
+    invoke<SymbolDoc | null>("hover_at", { path, content, line, col }),
+  /** Returns true when the Intelephense LSP client is ready. */
+  lspStatus: () => invoke<boolean>("lsp_status"),
+  /** Expand the current selection to the next enclosing AST node (Ctrl+W). */
+  smartSelect: (content: string, startLine: number, startCol: number, endLine: number, endCol: number) =>
+    invoke<{ start_line: number; start_col: number; end_line: number; end_col: number } | null>(
+      "smart_select", { content, startLine, startCol, endLine, endCol }
+    ),
+  /** Code-lens items (usages count) for each declaration in the file. */
+  codeLens: (path: string) =>
+    invoke<Array<{ line: number; label: string; command: string; arg: string }>>("code_lens", { path }),
   completionData: () => invoke<CompletionData>("completion_data"),
   schemaTables: () => invoke<[string, string[]][]>("schema_tables"),
   bladeViews: () => invoke<string[]>("blade_views"),
@@ -578,6 +597,12 @@ export const api = {
   termResize: (id: string, cols: number, rows: number) =>
     invoke<void>("term_resize", { id, cols, rows }),
   termKill: (id: string) => invoke<void>("term_kill", { id }),
+
+  // Phase 4: format + move
+  formatFile: (content: string) =>
+    invoke<string>("format_file", { content }),
+  applyMoveClass: (changeset: ChangeSet, oldPath: string, newPath: string) =>
+    invoke<string>("apply_move_class", { changeset, oldPath, newPath }),
 
   // templates
   templateList: () => invoke<Template[]>("template_list"),

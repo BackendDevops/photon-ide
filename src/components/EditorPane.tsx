@@ -1,5 +1,6 @@
 import Editor, { type OnMount } from "@monaco-editor/react";
 import { useEffect, useRef, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { api, type CompletionData } from "../lib/api";
 import { promoteConstructor } from "../lib/promote";
 import { attachVim, type VimMode } from "../lib/vim";
@@ -19,6 +20,12 @@ let completionCache: CompletionData = {
 let schemaCache: [string, string[]][] = [];
 // Blade view names for view()/@extends/@include completion.
 let bladeViews: string[] = [];
+// Artisan command names for Artisan::call() completion.
+let artisanCache: string[] = [];
+// IoC binding abstract names for app() / resolve() / make() completion.
+let bindingCache: string[] = [];
+// Dispatched event class names for event() / dispatch() completion.
+let eventCache: string[] = [];
 
 const BLADE_DIRECTIVES = [
   "if", "elseif", "else", "endif", "unless", "endunless", "isset", "endisset",
@@ -209,10 +216,74 @@ function calleeBeforeArgs(back: string): string | null {
   return null;
 }
 
+// Format a SymbolDoc into a Markdown hover string (PhpStorm-style).
+function formatSymbolDoc(doc: import("../lib/api").SymbolDoc): string {
+  const parts: string[] = [];
+  parts.push("```php\n" + (doc.signature || `${doc.kind} ${doc.name}`) + "\n```");
+  if (doc.doc) parts.push(doc.doc);
+  if (doc.params.length) {
+    const rows = doc.params
+      .map(([ty, name]) => (ty ? `- \`$${name}\` — \`${ty}\`` : `- \`$${name}\``))
+      .join("\n");
+    parts.push(`**Parameters**\n${rows}`);
+  }
+  if (doc.return_type) parts.push(`**Returns** \`${doc.return_type}\``);
+  if (doc.source) {
+    const short = doc.source.split("/").pop() ?? doc.source;
+    parts.push(`---\n_${short}_`);
+  }
+  return parts.join("\n\n");
+}
+
 // Laravel-aware completion + symbol hover, registered once globally.
 function registerProviders(monaco: typeof import("monaco-editor")) {
+  // ── Postfix helpers ────────────────────────────────────────────────────────
+  // Derive a short variable name from an expression for the `.var` template.
+  function varName(expr: string): string {
+    const chain = expr.match(/(?:->|::)(\w+)(?:\(\))?$/);
+    if (chain) {
+      // Strip "get" prefix: getName → name
+      return chain[1].replace(/^get([A-Z])/, (_, c: string) => c.toLowerCase()).toLowerCase() || "result";
+    }
+    return expr.match(/^\$(\w+)/)?.[1] ?? "result";
+  }
+
+  // Postfix templates — body() receives the extracted expression and returns
+  // a Monaco snippet string. `\\$\\${1:...}` → literal `$` + tabstop.
+  const POSTFIX: Array<{ label: string; detail: string; body: (e: string) => string }> = [
+    { label: "var",     detail: "Extract to variable",  body: (e) => `\\$\${1:${varName(e)}} = ${e};$0` },
+    { label: "return",  detail: "Wrap with return",      body: (e) => `return ${e};` },
+    { label: "if",      detail: "if (…) {}",             body: (e) => `if (${e}) {\n\t$0\n}` },
+    { label: "not",     detail: "if (!…) {}",            body: (e) => `if (!${e}) {\n\t$0\n}` },
+    { label: "null",    detail: "=== null check",        body: (e) => `if (${e} === null) {\n\t$0\n}` },
+    { label: "notnull", detail: "!== null check",        body: (e) => `if (${e} !== null) {\n\t$0\n}` },
+    { label: "foreach", detail: "foreach loop",          body: (e) => `foreach (${e} as \\$\${1:item}) {\n\t$0\n}` },
+    { label: "echo",    detail: "echo expression",       body: (e) => `echo ${e};` },
+    { label: "dump",    detail: "dump(…)",               body: (e) => `dump(${e});` },
+    { label: "dd",      detail: "die & dump",            body: (e) => `dd(${e});` },
+    { label: "count",   detail: "count(…)",              body: (e) => `count(${e})` },
+    { label: "json",    detail: "json_encode(…)",        body: (e) => `json_encode(${e})` },
+  ];
+
+  // Live Templates — expand abbreviations typed at the start of a PHP statement.
+  // These appear alongside normal completions; Monaco's snippet engine handles tabstops.
+  const LIVE_TEMPLATES: Array<{ label: string; detail: string; snippet: string }> = [
+    { label: "ctor",   detail: "Constructor",            snippet: "public function __construct(${1}) {\n\t${0}\n}" },
+    { label: "pubf",   detail: "Public function",        snippet: "public function ${1:name}(${2}): ${3:void}\n{\n\t${0}\n}" },
+    { label: "prif",   detail: "Private function",       snippet: "private function ${1:name}(${2}): ${3:void}\n{\n\t${0}\n}" },
+    { label: "prof",   detail: "Protected function",     snippet: "protected function ${1:name}(${2}): ${3:void}\n{\n\t${0}\n}" },
+    { label: "prop",   detail: "Property declaration",   snippet: "${1|public,protected,private|} ${2:string} \\$${3:name};$0" },
+    { label: "getter", detail: "Getter method",          snippet: "public function get${1:Name}(): ${2:string}\n{\n\treturn \\$this->${3:name};\n}" },
+    { label: "setter", detail: "Setter method",          snippet: "public function set${1:Name}(${2:string} \\$${3:value}): void\n{\n\t\\$this->${3:value} = \\$${3:value};\n}" },
+    { label: "test",   detail: "Pest test case",         snippet: "it('${1:does something}', function () {\n\t${0}\n});" },
+    { label: "feat",   detail: "Pest describe block",    snippet: "describe('${1:feature}', function () {\n\tit('${2:works}', function () {\n\t\t${0}\n\t});\n});" },
+    { label: "fori",   detail: "for loop with index",    snippet: "for (\\$${1:i} = 0; \\$${1:i} < ${2:count}; \\$${1:i}++) {\n\t${0}\n}" },
+    { label: "log",    detail: "Log::debug(…)",          snippet: "Log::debug(${1:'message'}, [${2}]);" },
+    { label: "env",    detail: "env() helper",           snippet: "env('${1:KEY}', ${2:null})" },
+  ];
+
   monaco.languages.registerCompletionItemProvider("php", {
-    triggerCharacters: ["'", '"', ">", ":", "\\", ">"],
+    triggerCharacters: ["'", '"', ">", ":", "\\", ".", ">"],
     async provideCompletionItems(model, position) {
       const line = model.getValueInRange({
         startLineNumber: position.lineNumber,
@@ -230,6 +301,71 @@ function registerProviders(monaco: typeof import("monaco-editor")) {
       const K = monaco.languages.CompletionItemKind;
       const mk = (items: string[], kind: number, detail: string) =>
         items.map((label) => ({ label, kind, insertText: label, range, detail }));
+
+      // ── Postfix completion (highest priority) ──────────────────────────────
+      // Detect EXPR.typed where EXPR is a PHP expression. When matched, return
+      // postfix templates that replace the full EXPR.typed text.
+      {
+        // Inline upto here (same as the later declaration) so postfix runs first.
+        const pfUpto = line.slice(0, position.column - 1);
+        // Regex: after a statement boundary, match a PHP expression then `.word`
+        const postfixRe = /(?:^|[\s;=({!,])(\$[\w]+(?:(?:->|::)[\w]+(?:\(\))?)*|[\w\\]+::[\w]+(?:\(\))?|[\w]+\([^)]*\)|'[^']*'|"[^"]*"|\d+)\.([\w]*)$/;
+        const pm = pfUpto.match(postfixRe);
+        if (pm) {
+          const expr = pm[1];
+          const typed = pm[2];
+          const snip = monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet;
+          // Replacement range covers the full EXPR.typed token.
+          const dotPos0   = pfUpto.length - typed.length - 1;
+          const exprStart = dotPos0 - expr.length;
+          const pfRange = {
+            startLineNumber: position.lineNumber,
+            endLineNumber:   position.lineNumber,
+            startColumn: exprStart + 1,
+            endColumn:   position.column,
+          };
+          const filtered = POSTFIX.filter((t) => t.label.startsWith(typed));
+          if (filtered.length > 0) {
+            return {
+              suggestions: filtered.map((t) => ({
+                label:           t.label,
+                kind:            K.Snippet,
+                insertText:      t.body(expr),
+                insertTextRules: snip,
+                range:           pfRange,
+                detail:          t.detail,
+                sortText:        "00" + t.label, // float above all other items
+              })),
+            };
+          }
+        }
+      }
+
+      // ── Live Templates ─────────────────────────────────────────────────────
+      // Trigger when the typed word is the ONLY non-whitespace text on the line
+      // (i.e. start of a new statement). Offers PHP snippet abbreviations.
+      {
+        const upto0 = line.slice(0, position.column - 1);
+        if (/^\s*\w+$/.test(upto0)) {
+          const typed0 = word.word;
+          const matched = LIVE_TEMPLATES.filter((t) => t.label.startsWith(typed0));
+          if (matched.length > 0) {
+            const snip0 = monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet;
+            return {
+              suggestions: matched.map((t) => ({
+                label:           t.label,
+                kind:            K.Snippet,
+                insertText:      t.snippet,
+                insertTextRules: snip0,
+                range,
+                detail:          t.detail,
+                documentation:   { value: "```php\n" + t.snippet.replace(/\$\{[^}]*\}/g, "…") + "\n```" },
+                sortText:        "0" + t.label,
+              })),
+            };
+          }
+        }
+      }
 
       // Type-aware member completion after `->` or `::`. Resolve the chain ROOT
       // so `User::query()->where(...)->` still completes against the model.
@@ -340,6 +476,19 @@ function registerProviders(monaco: typeof import("monaco-editor")) {
         }
       }
 
+      // Artisan::call('…') / Artisan::queue('…') → artisan command names.
+      if (/Artisan::(call|queue)\s*\(\s*['"][^'"]*$/.test(line))
+        return { suggestions: mk(artisanCache, K.Value, "artisan") };
+
+      // app('…') / resolve('…') / $this->app->make('…') → IoC binding names.
+      if (/(?:app|resolve|make)\s*\(\s*['"][^'"]*$/.test(line))
+        return { suggestions: mk(bindingCache, K.Interface, "binding") };
+
+      // dispatch(new …) / event(new …) / Event::dispatch(new …) → event classes.
+      if (/(?:dispatch|event)\s*\(\s*new\s+[\w\\]*$/.test(line) ||
+          /Event::dispatch\s*\(\s*new\s+[\w\\]*$/.test(line))
+        return { suggestions: mk(eventCache, K.Class, "event") };
+
       // Attribute completion (PHP 8): after `#[`, offer attribute classes.
       if (/#\[\s*\\?[\w\\]*$/.test(line)) {
         return {
@@ -435,6 +584,33 @@ function registerProviders(monaco: typeof import("monaco-editor")) {
     async provideCodeActions(model, range, context) {
       const actions: import("monaco-editor").languages.CodeAction[] = [];
       const insertLine = importInsertLine(model.getValue());
+
+      // Wrap the current selection in a try/catch block.
+      {
+        const selText = model.getValueInRange(range);
+        if (selText.trim().length > 0 && !range.isEmpty()) {
+          const firstLine = model.getLineContent(range.startLineNumber);
+          const indent = firstLine.match(/^(\s*)/)?.[1] ?? "";
+          const inner = selText
+            .split("\n")
+            .map((l) => "    " + l)
+            .join("\n");
+          actions.push({
+            title: "Wrap in try/catch",
+            kind: "refactor.rewrite",
+            edit: {
+              edits: [{
+                resource: model.uri,
+                versionId: model.getVersionId(),
+                textEdit: {
+                  range,
+                  text: `${indent}try {\n${inner}\n${indent}} catch (\\Throwable $e) {\n${indent}    throw $e;\n${indent}}`,
+                },
+              }],
+            },
+          });
+        }
+      }
 
       // PHP 8.3 #[Override] — offer on a method declaration inside a class that
       // extends/implements something, when the attribute isn't already present.
@@ -591,6 +767,54 @@ function registerProviders(monaco: typeof import("monaco-editor")) {
           }
           continue;
         }
+        // Possibly-null access → offer a null guard before the line.
+        if (/possibly null|null pointer|nullable|might not be defined/i.test(marker.message)) {
+          const ln = marker.startLineNumber;
+          const lineText = model.getLineContent(ln);
+          const indent = lineText.match(/^(\s*)/)?.[1] ?? "";
+          const nullVar = marker.message.match(/\$\w+/)?.[0] ?? lineText.match(/\$\w+/)?.[0];
+          if (nullVar) {
+            actions.push({
+              title: `Add null guard for ${nullVar}`,
+              kind: "quickfix",
+              diagnostics: [marker],
+              isPreferred: true,
+              edit: {
+                edits: [{
+                  resource: model.uri,
+                  versionId: model.getVersionId(),
+                  textEdit: {
+                    range: new monaco.Range(ln, 1, ln, 1),
+                    text: `${indent}if (${nullVar} === null) {\n${indent}    return;\n${indent}}\n`,
+                  },
+                }],
+              },
+            });
+          }
+          continue;
+        }
+
+        // Always offer a PHPStan/psalm suppression comment as a last resort.
+        {
+          const ln = marker.startLineNumber;
+          const indent = model.getLineContent(ln).match(/^(\s*)/)?.[1] ?? "";
+          actions.push({
+            title: "Suppress with @phpstan-ignore-next-line",
+            kind: "quickfix",
+            diagnostics: [marker],
+            edit: {
+              edits: [{
+                resource: model.uri,
+                versionId: model.getVersionId(),
+                textEdit: {
+                  range: new monaco.Range(ln, 1, ln, 1),
+                  text: `${indent}// @phpstan-ignore-next-line\n`,
+                },
+              }],
+            },
+          });
+        }
+
         const mm = marker.message.match(/Class '([^']+)' is not imported/);
         if (!mm) continue;
         let fqns: string[] = [];
@@ -628,28 +852,58 @@ function registerProviders(monaco: typeof import("monaco-editor")) {
     },
   });
 
+  // Code lens: show "N usages" above every class/method/function declaration.
+  // Clicking the lens triggers the photon.codeLensClick action registered in
+  // handleMount, which calls onFindUsages with the symbol name.
+  monaco.languages.registerCodeLensProvider("php", {
+    async provideCodeLenses(model) {
+      try {
+        const path = model.uri.path;
+        const items = await api.codeLens(path);
+        return {
+          lenses: items.map((item) => ({
+            range: new monaco.Range(item.line, 1, item.line, 1),
+            command: {
+              id:        "photon.codeLensClick",
+              title:     item.label,
+              arguments: [item.arg],
+            },
+          })),
+          dispose() {},
+        };
+      } catch {
+        return { lenses: [], dispose() {} };
+      }
+    },
+    resolveCodeLens: (_model, lens) => lens,
+  });
+
   monaco.languages.registerHoverProvider("php", {
     async provideHover(model, position) {
       const w = model.getWordAtPosition(position);
       if (!w) return null;
       try {
-        const doc = await api.symbolDoc(w.word);
+        // Position-aware hover: resolves $var->member chains via type inference
+        // so tooltips always target the right symbol, not just any same-named one.
+        const filePath = model.uri.path;
+        const content = model.getValue();
+        const doc = await api.hoverAt(
+          filePath,
+          content,
+          position.lineNumber,
+          position.column,
+        );
         if (doc) {
-          const parts: string[] = [];
-          // Signature as a PHP code block (PhpStorm-style).
-          parts.push("```php\n" + (doc.signature || `${doc.kind} ${doc.name}`) + "\n```");
-          if (doc.doc) parts.push(doc.doc);
-          if (doc.params.length) {
-            const ps = doc.params
-              .map(([ty, name]) => (ty ? `\`${ty}\` $${name}` : `$${name}`))
-              .join(", ");
-            parts.push(`**Parameters:** ${ps}`);
-          }
-          if (doc.return_type) parts.push(`**Returns:** \`${doc.return_type}\``);
-          if (doc.source) parts.push(`_Source: ${doc.source}_`);
-          return { contents: [{ value: parts.join("\n\n") }] };
+          return { contents: [{ value: formatSymbolDoc(doc) }] };
         }
-        // Fallback to the lightweight lookup.
+
+        // Fallback 1: word-based symbol_doc (catches global functions/classes).
+        const doc2 = await api.symbolDoc(w.word);
+        if (doc2) {
+          return { contents: [{ value: formatSymbolDoc(doc2) }] };
+        }
+
+        // Fallback 2: lightweight goto-symbol for files not yet indexed.
         const syms = await api.gotoSymbol(w.word);
         if (!syms.length) return null;
         const s = syms[0];
@@ -747,6 +1001,8 @@ export default function EditorPane({
   const monacoRef = useRef<Parameters<OnMount>[1] | null>(null);
   const [mounted, setMounted] = useState(false);
   const [vimState, setVimState] = useState<{ mode: VimMode; cmd: string } | null>(null);
+  // Stack for Ctrl+W structural selection expansion / Ctrl+Shift+W shrink.
+  const selectionStackRef = useRef<import("monaco-editor").Selection[]>([]);
   const onSaveRef = useRef(onSave);
   onSaveRef.current = onSave;
 
@@ -948,6 +1204,77 @@ export default function EditorPane({
       run: () => onLocalHistory(),
     });
 
+    // Cmd/Ctrl+Alt+L → Reformat Code with PHP-CS-Fixer (@PSR12), JetBrains-style.
+    editor.addAction({
+      id: "photon.formatFile",
+      label: "Photon: Reformat Code (PHP-CS-Fixer)",
+      keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyMod.Alt | monaco.KeyCode.KeyL],
+      run: async (ed) => {
+        const model = ed.getModel();
+        if (!model || model.getLanguageId() !== "php") return;
+        const content = model.getValue();
+        try {
+          const formatted = await api.formatFile(content);
+          if (formatted && formatted !== content) {
+            const pos = ed.getPosition();
+            ed.executeEdits("photon.format", [{
+              range: model.getFullModelRange(),
+              text: formatted,
+            }]);
+            if (pos) ed.setPosition(pos);
+          }
+        } catch { /* php-cs-fixer not installed — silent no-op */ }
+      },
+    });
+
+    // Ctrl+W → expand selection to the next enclosing AST node (JetBrains-style).
+    // The selection stack lets Ctrl+Shift+W shrink back to the previous range.
+    editor.addAction({
+      id: "photon.expandSelection",
+      label: "Photon: Expand Selection",
+      keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyW],
+      run: async (ed) => {
+        const model = ed.getModel();
+        const sel   = ed.getSelection();
+        if (!model || !sel) return;
+        try {
+          const next = await api.smartSelect(
+            model.getValue(),
+            sel.startLineNumber,
+            sel.startColumn,
+            sel.endLineNumber,
+            sel.endColumn,
+          );
+          if (!next) return;
+          selectionStackRef.current.push(sel);
+          ed.setSelection(
+            new monaco.Range(next.start_line, next.start_col, next.end_line, next.end_col),
+          );
+        } catch { /* tree-sitter parse failed — ignore */ }
+      },
+    });
+
+    // Ctrl+Shift+W → shrink selection back to the previous saved range.
+    editor.addAction({
+      id: "photon.shrinkSelection",
+      label: "Photon: Shrink Selection",
+      keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyW],
+      run: (ed) => {
+        const prev = selectionStackRef.current.pop();
+        if (prev) ed.setSelection(prev);
+      },
+    });
+
+    // Handler for code-lens "N usages" clicks — receives the symbol name as arg.
+    editor.addAction({
+      id: "photon.codeLensClick",
+      label: "Photon: Show Usages (code lens)",
+      run: (_ed, ...args) => {
+        const sym = args[0] as string | undefined;
+        if (sym) onFindUsages(sym);
+      },
+    });
+
     // Cmd/Ctrl+Shift+B → Go to Type Definition (the class of this expression).
     editor.addAction({
       id: "photon.gotoType",
@@ -1054,6 +1381,9 @@ export default function EditorPane({
     api.completionData().then((d) => { if (!cancelled) completionCache = d; }).catch(() => {});
     api.schemaTables().then((t) => { if (!cancelled) schemaCache = t; }).catch(() => {});
     api.bladeViews().then((v) => { if (!cancelled) bladeViews = v; }).catch(() => {});
+    api.artisanCommands().then((c) => { if (!cancelled) artisanCache = c; }).catch(() => {});
+    api.listBindings().then((b) => { if (!cancelled) bindingCache = b.map((x) => x.abstract_name); }).catch(() => {});
+    api.listEvents().then((e) => { if (!cancelled) eventCache = [...new Set(e.map((x) => x.event.split("\\").pop() ?? "").filter(Boolean))]; }).catch(() => {});
     if (path && monacoRef.current && editorRef.current) {
       const monaco = monacoRef.current;
       const model = editorRef.current.getModel();
@@ -1083,6 +1413,80 @@ export default function EditorPane({
     }
     return () => { cancelled = true; };
   }, [path, lintKey]);
+
+  // On-type linting: debounce 200ms → native checks (~2ms, synchronous result)
+  // + fire PHPStan async (results come back as "diagnostics" events below).
+  useEffect(() => {
+    if (!path?.endsWith(".php") || !mounted) return;
+    const timer = setTimeout(async () => {
+      const monaco = monacoRef.current;
+      const model = editorRef.current?.getModel();
+      if (!monaco || !model) return;
+      try {
+        const diags = await api.lintContent(path, value);
+        monaco.editor.setModelMarkers(
+          model,
+          "photon",
+          diags.map((d) => ({
+            startLineNumber: d.line,
+            startColumn: d.col,
+            endLineNumber: d.line,
+            endColumn: d.end_col === 4294967295 ? model.getLineMaxColumn(d.line) : d.end_col,
+            message: d.message,
+            severity:
+              d.severity === "error"
+                ? monaco.MarkerSeverity.Error
+                : d.severity === "info"
+                ? monaco.MarkerSeverity.Info
+                : monaco.MarkerSeverity.Warning,
+          }))
+        );
+        // Queue PHPStan in the background worker — results arrive via the
+        // "diagnostics" listener below, no await needed.
+        api.lintContentDeep(path, value).catch(() => {});
+      } catch { /* no project open yet */ }
+    }, 200);
+    return () => clearTimeout(timer);
+  }, [value, path, mounted]);
+
+  // Listen for "diagnostics" events emitted by the background PHPStan worker.
+  // Merges into the "phpstan" marker owner so Monaco shows them with distinct
+  // icons from native photon markers, enabling per-source clear.
+  useEffect(() => {
+    if (!path?.endsWith(".php")) return;
+    let active = true;
+    type DiagEvent = { file: string; source: string; diagnostics: import("../lib/api").Diagnostic[] };
+    const unlisten = listen<DiagEvent>("diagnostics", (event) => {
+      if (!active) return;
+      // Only apply results for the file currently open in this pane.
+      if (event.payload.file !== path) return;
+      const monaco = monacoRef.current;
+      const model = editorRef.current?.getModel();
+      if (!monaco || !model) return;
+      const owner = event.payload.source === "phpstan" ? "phpstan" : "photon";
+      monaco.editor.setModelMarkers(
+        model,
+        owner,
+        event.payload.diagnostics.map((d) => ({
+          startLineNumber: d.line,
+          startColumn: d.col,
+          endLineNumber: d.line,
+          endColumn: d.end_col === 4294967295 ? model.getLineMaxColumn(d.line) : d.end_col,
+          message: d.message,
+          severity:
+            d.severity === "error"
+              ? monaco.MarkerSeverity.Error
+              : d.severity === "info"
+              ? monaco.MarkerSeverity.Info
+              : monaco.MarkerSeverity.Warning,
+        }))
+      );
+    });
+    return () => {
+      active = false;
+      unlisten.then((fn) => fn()).catch(() => {});
+    };
+  }, [path]);
 
   // Breakpoint glyphs in the gutter.
   const bpDecos = useRef<string[]>([]);
@@ -1166,6 +1570,11 @@ export default function EditorPane({
     }
   }, [debugLine, debugInline]);
 
+  // Clear structural-selection stack whenever the file changes.
+  useEffect(() => {
+    selectionStackRef.current = [];
+  }, [path]);
+
   useEffect(() => {
     if (reveal && reveal.line && editorRef.current) {
       const ed = editorRef.current;
@@ -1188,6 +1597,17 @@ export default function EditorPane({
   }, [settings]);
 
   // Native Vim mode — attach/detach on the live editor instance.
+  // Forward the "Reformat Code" menu item (Cmd+Alt+L) to the editor action.
+  useEffect(() => {
+    if (!mounted) return;
+    const unlisten = listen<string>("menu-action", (event) => {
+      if (event.payload === "code_reformat") {
+        editorRef.current?.trigger("menu", "photon.formatFile", null);
+      }
+    });
+    return () => { unlisten.then((fn) => fn()).catch(() => {}); };
+  }, [mounted]);
+
   useEffect(() => {
     const ed = editorRef.current;
     const mo = monacoRef.current;

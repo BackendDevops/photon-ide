@@ -6,6 +6,8 @@
 
 mod ai;
 mod dbtools;
+mod diagnostics;
+mod lsp;
 mod redis_client;
 mod debugger;
 mod extensions;
@@ -26,11 +28,24 @@ use tauri::menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuild
 use tauri::{AppHandle, Emitter, Manager, State};
 use terminal::Terminals;
 
+// SymbolDoc is defined near symbol_doc; keep Default derivable by using
+// OnceLock (unset = no worker yet) and DashMap (empty by default).
 #[derive(Default)]
 struct AppState {
     engine: Mutex<Option<Engine>>,
     /// Live filesystem watchers, keyed by project label (kept alive here).
     watchers: Mutex<std::collections::HashMap<String, notify::RecommendedWatcher>>,
+    /// Background PHPStan worker — initialized once in setup().
+    diag_worker: std::sync::OnceLock<diagnostics::DiagnosticsWorker>,
+    /// In-memory hover cache: (workspace_path, symbol_word) → rendered doc.
+    /// Invalidated on every fs-changed event for the affected file.
+    hover_cache: dashmap::DashMap<(String, String), SymbolDoc>,
+    /// Intelephense LSP client — None until a project is opened and the binary
+    /// is found. Wrapped in parking_lot::Mutex so commands can swap it on
+    /// project change without a separate OnceLock.
+    lsp: parking_lot::Mutex<Option<lsp::LspClient>>,
+    /// Per-URI textDocument version counter for didChange notifications.
+    lsp_versions: dashmap::DashMap<String, i32>,
 }
 
 type CmdResult<T> = Result<T, String>;
@@ -95,12 +110,38 @@ fn open_project(
         }
     };
     start_root_watcher(&app, &state, &path);
+
+    // Spawn LSP client in the background so project open stays fast.
+    // Any prior client (old project root) is replaced.
+    let path2 = path.clone();
+    let handle2 = app.clone();
+    std::thread::Builder::new()
+        .name("photon-lsp-init".into())
+        .spawn(move || {
+            match lsp::LspClient::spawn(&path2, handle2.clone()) {
+                Ok(client) => {
+                    let s = handle2.state::<AppState>();
+                    *s.lsp.lock() = Some(client);
+                }
+                Err(e) => {
+                    // Intelephense not installed — degrade gracefully.
+                    eprintln!("[photon-lsp] not available: {e}");
+                }
+            }
+        })
+        .ok();
+
     Ok(summary)
 }
 
 /// Re-index a single workspace path after an external filesystem change.
+/// Also evicts all hover-cache entries for the changed file so the next hover
+/// request rebuilds from the updated index.
 #[tauri::command]
 fn reindex_path(path: String, state: State<'_, AppState>) -> CmdResult<()> {
+    // Evict hover cache for this file before re-indexing.
+    state.hover_cache.retain(|(file, _), _| file != &path);
+
     let mut guard = state.engine.lock();
     let engine = guard.as_mut().ok_or("No project open")?;
     engine.reindex_path(&path).map_err(err)
@@ -775,6 +816,69 @@ fn run_artisan(args: String, state: State<'_, AppState>) -> CmdResult<String> {
     Ok(s)
 }
 
+// ------------------------- Phase 4: format + move -------------------------
+
+/// Reformat a PHP file's content with php-cs-fixer (@PSR12) and return the
+/// result. Checks `vendor/bin/php-cs-fixer` first, then falls back to the
+/// global binary. The fix runs on a temp file so the on-disk source is never
+/// touched; the caller decides whether to apply the diff.
+#[tauri::command]
+fn format_file(content: String, state: State<'_, AppState>) -> CmdResult<String> {
+    let root = project_root(&state).unwrap_or_default();
+    // Find the fixer binary: prefer project-local vendor copy.
+    let binary = {
+        let vendor = std::path::Path::new(&root).join("vendor/bin/php-cs-fixer");
+        if vendor.exists() {
+            vendor.to_string_lossy().to_string()
+        } else {
+            "php-cs-fixer".to_string()
+        }
+    };
+    // Write content to a uniquely-named temp file.
+    let pid = std::process::id();
+    let tmp = std::env::temp_dir().join(format!("photon_fmt_{pid}.php"));
+    std::fs::write(&tmp, content.as_bytes()).map_err(err)?;
+    let result = std::process::Command::new(&binary)
+        .args(["fix", "--using-cache=no", "--no-interaction", "--rules=@PSR12"])
+        .arg(&tmp)
+        .output();
+    match result {
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(format!("php-cs-fixer not available: {e}"))
+        }
+        Ok(out) => {
+            let formatted = std::fs::read_to_string(&tmp).unwrap_or_default();
+            let _ = std::fs::remove_file(&tmp);
+            if !out.status.success() && formatted.is_empty() {
+                return Err(String::from_utf8_lossy(&out.stderr).to_string());
+            }
+            Ok(formatted)
+        }
+    }
+}
+
+/// Apply a move-class ChangeSet (text edits across all referencing files) and
+/// then physically rename `old_path` → `new_path`. Returns `new_path`.
+#[tauri::command]
+fn apply_move_class(
+    changeset: ChangeSet,
+    old_path: String,
+    new_path: String,
+    state: State<'_, AppState>,
+) -> CmdResult<String> {
+    {
+        let mut guard = state.engine.lock();
+        let engine = guard.as_mut().ok_or("No project open")?;
+        engine.apply_changeset(&changeset, None).map_err(err)?;
+    }
+    if let Some(parent) = std::path::Path::new(&new_path).parent() {
+        std::fs::create_dir_all(parent).map_err(err)?;
+    }
+    std::fs::rename(&old_path, &new_path).map_err(err)?;
+    Ok(new_path)
+}
+
 // ------------------------- type intelligence (v2 W1) -------------------------
 
 /// Resolve a member-access chain to a class name, walking declared member
@@ -1348,12 +1452,25 @@ fn usages_popup(name: String, state: State<'_, AppState>) -> CmdResult<photon_co
             .nth(r.line.saturating_sub(1) as usize)
             .map(|s| s.trim().to_string())
             .unwrap_or_default();
+        // Populate container: find the nearest method/function before r.line in
+        // the same file. This gives "used in UserController::store" context.
+        let container = {
+            let file_syms = syms
+                .entry(r.file.clone())
+                .or_insert_with(|| engine.index.symbols_in_file(&r.file).unwrap_or_default());
+            file_syms
+                .iter()
+                .filter(|s| matches!(s.kind, photon_core::SymbolKind::Method | photon_core::SymbolKind::Function))
+                .filter(|s| s.line <= r.line)
+                .max_by_key(|s| s.line)
+                .map(|s| s.name.clone())
+        };
         hits.push(photon_core::UsageHit {
             file: r.file,
             line: r.line,
             kind: r.kind.as_str().to_string(),
             preview,
-            container: None,
+            container,
         });
     }
     Ok(photon_core::UsagesResult { title, total: kept, hits })
@@ -2158,6 +2275,364 @@ fn symbol_doc(name: String, state: State<'_, AppState>) -> CmdResult<Option<Symb
         source: d.file,
         name: d.name,
     }))
+}
+
+// ── On-type linting ───────────────────────────────────────────────────────────
+
+/// Fast, synchronous diagnostics on the **live buffer** (not the saved file).
+/// Runs native photon-core inspections and Laravel key validation only (~2ms).
+/// Index-aware checks (undefined members, overrides) stay in `lint_file` which
+/// triggers on save — they are too slow for per-keystroke firing.
+#[tauri::command]
+fn lint_content(
+    path: String,
+    content: String,
+    state: State<'_, AppState>,
+) -> CmdResult<Vec<photon_core::Diagnostic>> {
+    if !path.ends_with(".php") {
+        return Ok(vec![]);
+    }
+    let mut out = photon_core::inspect::inspect_file(&content);
+
+    // Laravel key validation (route/config/trans) using the persisted index.
+    if let Some(engine) = state.engine.lock().as_ref() {
+        let routes = engine.index.routes().unwrap_or_default();
+        for (kind, key, off) in photon_core::laravel::key_usages(&content) {
+            let seg = key.split('.').next().unwrap_or(&key);
+            let exists = match kind.as_str() {
+                "route" => routes.iter().any(|r| r.name.as_deref() == Some(key.as_str())),
+                "config" => {
+                    engine.index.config_key(&key).ok().flatten().is_some()
+                        || engine.index.config_namespace_known(seg).unwrap_or(true)
+                }
+                "trans" => {
+                    engine.index.translation(&key).map(|v| !v.is_empty()).unwrap_or(false)
+                        || engine.index.translation_namespace_known(seg).unwrap_or(true)
+                }
+                _ => true,
+            };
+            if !exists {
+                let before = &content[..off];
+                let line = before.matches('\n').count() as u32 + 1;
+                let col = (off - before.rfind('\n').map(|i| i + 1).unwrap_or(0)) as u32 + 1;
+                out.push(photon_core::Diagnostic {
+                    line,
+                    col,
+                    end_col: col + key.chars().count() as u32,
+                    message: format!("Unknown {} key '{}'", kind, key),
+                    severity: "warning".into(),
+                });
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Fire-and-forget: submits a PHPStan job to the background worker AND sends
+/// textDocument/didOpen or didChange to the LSP. Results arrive as
+/// `"diagnostics"` Tauri events — the frontend must listen for them.
+#[tauri::command]
+fn lint_content_deep(
+    path: String,
+    content: String,
+    state: State<'_, AppState>,
+) -> CmdResult<()> {
+    let root = project_root(&state).unwrap_or_default();
+
+    // PHPStan background job.
+    if let Some(worker) = state.diag_worker.get() {
+        let gen = worker.gen.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        worker.submit(diagnostics::DiagJob {
+            file: path.clone(),
+            content: content.clone(),
+            project_root: root,
+            gen,
+        });
+    }
+
+    // LSP did_open / did_change.
+    if path.ends_with(".php") {
+        let uri = lsp::path_to_uri(&path);
+        let lsp_guard = state.lsp.lock();
+        if let Some(client) = lsp_guard.as_ref() {
+            // Bump version counter; first time = did_open.
+            let mut entry = state.lsp_versions.entry(uri.clone()).or_insert(0);
+            if *entry == 0 {
+                *entry = 1;
+                drop(entry);
+                client.did_open(&uri, &content);
+            } else {
+                *entry += 1;
+                let v = *entry;
+                drop(entry);
+                client.did_change(&uri, v, &content);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+// ── Position-aware hover ──────────────────────────────────────────────────────
+
+/// Rich hover at a cursor position (line/col, 1-based). Resolves `$var->member`
+/// chains via type inference so the tooltip always targets the right symbol,
+/// not just any symbol with the same short name. Results are cached per
+/// (workspace_path, word) and evicted by `fs-changed`.
+#[tauri::command]
+fn hover_at(
+    path: String,
+    content: String,
+    line: u32,
+    col: u32,
+    state: State<'_, AppState>,
+) -> CmdResult<Option<SymbolDoc>> {
+    if !path.ends_with(".php") {
+        return Ok(None);
+    }
+
+    // Extract token + receiver context at (line, col).
+    let ctx = match photon_core::hover::token_context_at(&content, line, col) {
+        Some(c) => c,
+        None => return Ok(None),
+    };
+
+    // Build a lookup key that encodes receiver resolution where possible.
+    // e.g. "$user->getName" → look up "User::getName" in the index.
+    let lookup_word = resolve_lookup_word(&ctx, &content, &path, &state);
+
+    // Serve from cache if the resolved word is cached for this file.
+    let cache_key = (path.clone(), lookup_word.clone());
+    if let Some(cached) = state.hover_cache.get(&cache_key) {
+        return Ok(Some(SymbolDoc {
+            name: cached.name.clone(),
+            kind: cached.kind.clone(),
+            signature: cached.signature.clone(),
+            params: cached.params.clone(),
+            return_type: cached.return_type.clone(),
+            doc: cached.doc.clone(),
+            source: cached.source.clone(),
+        }));
+    }
+
+    // Look up the symbol using the same logic as symbol_doc but with the
+    // receiver-resolved name so member hover targets the right class.
+    let result = {
+        let guard = state.engine.lock();
+        let engine = match guard.as_ref() {
+            Some(e) => e,
+            None => return Ok(None),
+        };
+
+        let short = lookup_word.rsplit("::").next()
+            .unwrap_or(&lookup_word)
+            .rsplit('\\').next()
+            .unwrap_or(&lookup_word);
+
+        let def = engine
+            .index
+            .find_symbol(short)
+            .unwrap_or_default()
+            .into_iter()
+            .find(|d| {
+                // Prefer the definition whose container matches the resolved class.
+                if lookup_word.contains("::") {
+                    let class_part = lookup_word.split("::").next().unwrap_or("");
+                    d.container.as_deref() == Some(class_part)
+                        || d.fqn.as_deref().map(|f| f.contains(class_part)).unwrap_or(false)
+                } else {
+                    matches!(
+                        d.kind,
+                        photon_core::SymbolKind::Method
+                            | photon_core::SymbolKind::Function
+                            | photon_core::SymbolKind::Class
+                            | photon_core::SymbolKind::Interface
+                            | photon_core::SymbolKind::Trait
+                            | photon_core::SymbolKind::Enum
+                            | photon_core::SymbolKind::Property
+                    )
+                }
+            });
+
+        let d = match def {
+            Some(d) => d,
+            None => return Ok(None),
+        };
+
+        let src = engine.workspace.read_file(&d.file).unwrap_or_default();
+        let (s, e) = (
+            (d.range_start as usize).min(src.len()),
+            (d.range_end as usize).min(src.len()),
+        );
+        let decl = if e > s { &src[s..e] } else { "" };
+        let header = decl.split('{').next().unwrap_or(decl);
+        let signature = header.split_whitespace().collect::<Vec<_>>().join(" ");
+        let doc = photon_core::php::doc_before(&src, s);
+        let is_callable = matches!(
+            d.kind,
+            photon_core::SymbolKind::Method | photon_core::SymbolKind::Function
+        );
+        let params = if is_callable {
+            photon_core::php::param_specs(decl)
+        } else {
+            Vec::new()
+        };
+        let return_type = doc
+            .and_then(photon_core::phpdoc::raw_return)
+            .or_else(|| photon_core::php::return_type(decl))
+            .unwrap_or_default();
+        let description = doc
+            .and_then(photon_core::phpdoc::description)
+            .unwrap_or_default();
+
+        SymbolDoc {
+            kind: d.kind.as_str().to_string(),
+            signature,
+            params,
+            return_type,
+            doc: description,
+            source: d.file,
+            name: d.name,
+        }
+    };
+
+    // Enrich with Intelephense hover if available (adds PHPDoc from stubs etc.).
+    let lsp_md = {
+        let lsp_guard = state.lsp.lock();
+        lsp_guard.as_ref().and_then(|client| {
+            let uri = lsp::path_to_uri(&path);
+            client.hover(&uri, line, col)
+        })
+    };
+    let enriched_doc = match lsp_md {
+        Some(md) if !md.is_empty() && result.doc.is_empty() => md,
+        Some(md) if !md.is_empty() => format!("{}\n\n---\n{}", result.doc, md),
+        _ => result.doc.clone(),
+    };
+
+    let final_result = SymbolDoc {
+        doc: enriched_doc,
+        name: result.name.clone(),
+        kind: result.kind.clone(),
+        signature: result.signature.clone(),
+        params: result.params.clone(),
+        return_type: result.return_type.clone(),
+        source: result.source.clone(),
+    };
+
+    // Cache and return.
+    state.hover_cache.insert(cache_key, SymbolDoc {
+        name: final_result.name.clone(),
+        kind: final_result.kind.clone(),
+        signature: final_result.signature.clone(),
+        params: final_result.params.clone(),
+        return_type: final_result.return_type.clone(),
+        doc: final_result.doc.clone(),
+        source: final_result.source.clone(),
+    });
+    Ok(Some(final_result))
+}
+
+/// Returns true when the Intelephense LSP client is connected and ready.
+#[tauri::command]
+fn lsp_status(state: State<'_, AppState>) -> bool {
+    state.lsp.lock().is_some()
+}
+
+// ── Structural Selection (Ctrl+W) ─────────────────────────────────────────────
+
+/// Expand the Monaco selection to the next enclosing AST node.
+/// All positions are 1-based. Returns None when already at the root.
+#[tauri::command]
+fn smart_select(
+    content: String,
+    start_line: u32,
+    start_col:  u32,
+    end_line:   u32,
+    end_col:    u32,
+) -> Option<photon_core::SelectionRange> {
+    photon_core::selection::expand_selection(&content, start_line, start_col, end_line, end_col)
+}
+
+// ── Code Lens (N usages) ──────────────────────────────────────────────────────
+
+#[derive(serde::Serialize)]
+struct CodeLensItem {
+    line:    u32,
+    /// Human-readable label, e.g. "3 usages".
+    label:   String,
+    /// Monaco command id to run when the lens is clicked.
+    command: String,
+    /// Argument passed to the command (the symbol name).
+    arg:     String,
+}
+
+/// Return code-lens items for every top-level declaration in `path` that has
+/// at least one reference in the index. Results are ordered by line number.
+#[tauri::command]
+fn code_lens(path: String, state: State<'_, AppState>) -> CmdResult<Vec<CodeLensItem>> {
+    let guard = state.engine.lock();
+    let engine = guard.as_ref().ok_or("No project open")?;
+    let rows = engine.index.reference_counts_for_file(&path).map_err(err)?;
+    Ok(rows
+        .into_iter()
+        .map(|(name, line, cnt)| CodeLensItem {
+            line,
+            label: if cnt == 1 {
+                "1 usage".to_string()
+            } else {
+                format!("{cnt} usages")
+            },
+            command: "photon.findUsages".to_string(),
+            arg: name,
+        })
+        .collect())
+}
+
+/// Derive the index lookup word from a `TokenContext`.
+/// - `$user->getName` → resolve `$user` to `User` → `"User::getName"`
+/// - `self::create`   → resolve `self` to enclosing class → `"Post::create"`
+/// - bare `Foo`       → `"Foo"` unchanged
+fn resolve_lookup_word(
+    ctx: &photon_core::hover::TokenContext,
+    content: &str,
+    path: &str,
+    state: &State<'_, AppState>,
+) -> String {
+    let Some(ref receiver) = ctx.receiver else {
+        return ctx.word.clone();
+    };
+
+    // Resolve `$this` / `self` / `static` to the enclosing class name.
+    let class = if matches!(receiver.as_str(), "$this" | "self" | "static" | "parent") {
+        let guard = state.engine.lock();
+        guard.as_ref().and_then(|engine| {
+            let syms = engine.index.symbols_in_file(path).unwrap_or_default();
+            // Find the class whose range covers the cursor (use 0 as a proxy — good enough
+            // since we just need the file's primary class for $this).
+            syms.into_iter()
+                .find(|s| {
+                    matches!(
+                        s.kind,
+                        photon_core::SymbolKind::Class
+                            | photon_core::SymbolKind::Trait
+                            | photon_core::SymbolKind::Enum
+                    )
+                })
+                .map(|s| s.name)
+        })
+    } else if receiver.starts_with('$') {
+        // Infer variable type from source.
+        photon_core::infer::infer_var_type(content, receiver)
+    } else {
+        // Static call like `User::find` — receiver is already the class name.
+        Some(receiver.clone())
+    };
+
+    match class {
+        Some(c) => format!("{}::{}", c, ctx.word),
+        None => ctx.word.clone(),
+    }
 }
 
 #[derive(serde::Serialize)]
@@ -3122,6 +3597,11 @@ pub fn run() {
         .setup(|app| {
             let _ = app.get_webview_window("main");
             let handle = app.handle().clone();
+
+            // Spawn the background diagnostics worker (PHPStan etc.) once.
+            let state = app.state::<AppState>();
+            let _ = state.diag_worker.set(diagnostics::DiagnosticsWorker::new(handle.clone()));
+
             if let Ok(menu) = build_app_menu(&handle) {
                 let _ = app.set_menu(menu);
             }
@@ -3176,6 +3656,14 @@ pub fn run() {
             run_artisan,
             run_test,
             lint_file,
+            lint_content,
+            lint_content_deep,
+            hover_at,
+            lsp_status,
+            smart_select,
+            code_lens,
+            format_file,
+            apply_move_class,
             completion_data,
             schema_tables,
             blade_views,

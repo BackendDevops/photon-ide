@@ -287,6 +287,17 @@ pub struct Diagnostic {
     pub severity: String,
 }
 
+/// A batch of diagnostics for one file, pushed via Tauri event.
+/// `source` distinguishes marker owners so Monaco can clear each set
+/// independently ("photon" for native, "phpstan" for PHPStan).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileDiagnostics {
+    pub file: String,
+    /// "photon" | "phpstan"
+    pub source: String,
+    pub diagnostics: Vec<Diagnostic>,
+}
+
 /// Completion data the editor uses to offer Laravel-aware suggestions.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CompletionData {

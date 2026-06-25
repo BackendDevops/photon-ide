@@ -852,6 +852,35 @@ impl Index {
         Ok(rows.filter_map(Result::ok).collect())
     }
 
+    /// For every class/interface/trait/enum/function/method declared in `file`,
+    /// return `(name, line, ref_count)` where `ref_count` is how many references
+    /// to that name exist across the entire index. Used for code-lens display.
+    ///
+    /// A single JOIN is far cheaper than N individual `references_to` calls.
+    pub fn reference_counts_for_file(
+        &self,
+        file: &str,
+    ) -> anyhow::Result<Vec<(String, u32, u64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT s.name, s.line, COUNT(r.rowid) AS cnt
+             FROM symbols s
+             LEFT JOIN refs r ON r.name = s.name
+             WHERE s.file = ?1
+               AND s.kind IN ('class','interface','trait','enum','function','method')
+             GROUP BY s.name, s.line
+             HAVING cnt > 0
+             ORDER BY s.line",
+        )?;
+        let rows = stmt.query_map(params![file], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)? as u32,
+                r.get::<_, i64>(2)? as u64,
+            ))
+        })?;
+        Ok(rows.filter_map(Result::ok).collect())
+    }
+
     /// All routes ordered by uri.
     pub fn routes(&self) -> anyhow::Result<Vec<Route>> {
         let mut stmt = self
